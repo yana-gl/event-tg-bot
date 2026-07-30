@@ -7,3 +7,5 @@ __pycache__/
 data/
 *.sqlite3
 .DS_Store
+admin-ui/node_modules/
+admin-ui/dist/

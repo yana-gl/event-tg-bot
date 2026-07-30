@@ -138,3 +138,82 @@ def _request_openrouter(api_key: str, model: str, prompt: str) -> dict[str, Any]
 
     with urllib.request.urlopen(request, timeout=60) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def find_repeats(
+    *,
+    api_key: str,
+    model: str,
+    new_events: list[dict[str, Any]],
+    existing_events: list[dict[str, Any]],
+) -> list[int | None]:
+    if not new_events or not existing_events:
+        return [None] * len(new_events)
+
+    prompt = build_dedupe_prompt(new_events, existing_events)
+    try:
+        payload = _request_openrouter(api_key=api_key, model=model, prompt=prompt)
+    except (ValueError, urllib.error.HTTPError, urllib.error.URLError):
+        return [None] * len(new_events)
+
+    content = payload["choices"][0]["message"]["content"]
+    mapping = _parse_dedupe_response(content, expected=len(new_events))
+    return [mapping.get(str(index)) for index in range(len(new_events))]
+
+
+def build_dedupe_prompt(
+    new_events: list[dict[str, Any]],
+    existing_events: list[dict[str, Any]],
+) -> str:
+    return f"""
+Ты определяешь, какие из новых событий являются повторами уже существующих.
+
+Существующие события (id и описание):
+{json.dumps(_compact_existing(existing_events), ensure_ascii=False, indent=2)}
+
+Новые события (индекс и описание):
+{json.dumps(_compact_new(new_events), ensure_ascii=False, indent=2)}
+
+Повтор — это событие, которое анонсирует ту же фактическую активность: та же дата и то же место (по смыслу, а не по точной строке), похожий заголовок (по смыслу). Не считай повтором совпадение только по дате или только по категории.
+
+Верни только строгий JSON без Markdown и комментариев.
+Формат: объект, где ключ — индекс нового события (как строка), значение — id существующего события-оригинала (число) или null, если повтора нет.
+Пример: {{"0": 12, "1": null, "2": 7}}
+""".strip()
+
+
+def _compact_existing(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": row["id"],
+            "title": row.get("title"),
+            "date": row.get("date"),
+            "place": row.get("place"),
+        }
+        for row in rows
+    ]
+
+
+def _compact_new(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "index": index,
+            "title": event.get("title"),
+            "date": event.get("date"),
+            "place": event.get("place"),
+        }
+        for index, event in enumerate(rows)
+    ]
+
+
+def _parse_dedupe_response(text: str, expected: int) -> dict[str, Any]:
+    parsed = extract_json_object(text)
+    if not isinstance(parsed, dict):
+        return {}
+    mapping: dict[str, Any] = {}
+    for key, value in parsed.items():
+        if value is None:
+            mapping[str(key)] = None
+        elif isinstance(value, (int, float)):
+            mapping[str(key)] = int(value)
+    return mapping

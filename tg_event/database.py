@@ -5,9 +5,9 @@ from pathlib import Path
 from typing import Any
 
 
-def connect_database(path: Path) -> sqlite3.Connection:
+def connect_database(path: Path, check_same_thread: bool = True) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path)
+    connection = sqlite3.connect(path, check_same_thread=check_same_thread)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
@@ -60,6 +60,22 @@ def init_database(connection: sqlite3.Connection) -> None:
             status TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+
+        DROP VIEW IF EXISTS events_for_review;
+        CREATE VIEW events_for_review AS
+        SELECT * FROM events WHERE status = 'draft' ORDER BY id DESC;
+
+        DROP VIEW IF EXISTS events_current;
+        CREATE VIEW events_current AS
+        SELECT * FROM events
+        WHERE status = 'published' AND date IS NOT NULL AND date >= date('now')
+        ORDER BY date, time;
+
+        DROP VIEW IF EXISTS events_outdated;
+        CREATE VIEW events_outdated AS
+        SELECT * FROM events
+        WHERE date IS NOT NULL AND date < date('now')
+        ORDER BY date DESC;
         """
     )
     connection.commit()
@@ -77,6 +93,138 @@ def save_parsed_row(connection: sqlite3.Connection, row: dict[str, Any]) -> int:
 def save_parsed_rows(connection: sqlite3.Connection, rows: list[dict[str, Any]]) -> None:
     for row in rows:
         save_parsed_row(connection, row)
+
+
+def fetch_published_events(
+    connection: sqlite3.Connection,
+    date_from: str,
+    date_to: str,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT title, date, end_date, time, end_time, place, address, category, price
+        FROM events
+        WHERE status = 'published' AND date IS NOT NULL
+          AND date >= ? AND date <= ?
+        ORDER BY date, time
+        """,
+        (date_from, date_to),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def fetch_candidate_events(
+    connection: sqlite3.Connection,
+    dates: list[str],
+) -> list[dict[str, Any]]:
+    if not dates:
+        return []
+    placeholders = ",".join("?" * len(dates))
+    rows = connection.execute(
+        f"""
+        SELECT id, title, date, place, address, category
+        FROM events
+        WHERE date IS NOT NULL AND date IN ({placeholders})
+        """,
+        dates,
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+ADMIN_EDITABLE_FIELDS = {
+    "title",
+    "date",
+    "end_date",
+    "time",
+    "end_time",
+    "place",
+    "address",
+    "category",
+    "price",
+    "status",
+}
+
+
+def fetch_events_by_status(
+    connection: sqlite3.Connection,
+    status: str = "draft",
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT id, title, date, end_date, time, place, address, category, price, status
+        FROM events
+        WHERE status = ?
+        ORDER BY id DESC
+        """,
+        (status,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def fetch_event_detail(
+    connection: sqlite3.Connection,
+    event_id: int,
+) -> dict[str, Any] | None:
+    row = connection.execute(
+        """
+        SELECT
+            e.id, e.title, e.date, e.end_date, e.time, e.end_time,
+            e.place, e.address, e.category, e.price, e.confidence,
+            e.reason, e.status, e.created_at,
+            p.id AS raw_post_id, p.message_id, p.url, p.text, p.published_at,
+            p.city, s.username AS source
+        FROM events e
+        JOIN raw_posts p ON p.id = e.raw_post_id
+        JOIN sources s ON s.id = p.source_id
+        WHERE e.id = ?
+        """,
+        (event_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    detail = dict(row)
+    links = connection.execute(
+        "SELECT url FROM post_links WHERE raw_post_id = ?",
+        (detail["raw_post_id"],),
+    ).fetchall()
+    detail["links"] = [r["url"] for r in links]
+    return detail
+
+
+def update_event(
+    connection: sqlite3.Connection,
+    event_id: int,
+    fields: dict[str, Any],
+) -> bool:
+    provided = set(fields)
+    unknown = provided - ADMIN_EDITABLE_FIELDS
+    if unknown:
+        names = ", ".join(sorted(unknown))
+        raise ValueError(f"Unknown editable fields: {names}")
+
+    assignments = []
+    values: list[Any] = []
+    for name in ADMIN_EDITABLE_FIELDS:
+        if name in fields:
+            assignments.append(f"{name} = ?")
+            values.append(fields[name])
+    if not assignments:
+        return connection.execute(
+            "SELECT 1 FROM events WHERE id = ?", (event_id,)
+        ).fetchone() is not None
+
+    values.append(event_id)
+    with connection:
+        cursor = connection.execute(
+            f"UPDATE events SET {', '.join(assignments)} WHERE id = ?", values
+        )
+    return cursor.rowcount > 0
+
+
+def delete_event(connection: sqlite3.Connection, event_id: int) -> bool:
+    with connection:
+        cursor = connection.execute("DELETE FROM events WHERE id = ?", (event_id,))
+    return cursor.rowcount > 0
 
 
 def _upsert_source(connection: sqlite3.Connection, username: str, city: str) -> int:

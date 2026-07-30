@@ -1,6 +1,19 @@
 import unittest
 
-from tg_event.openrouter_parser import build_prompt, extract_json_object
+from tg_event.openrouter_parser import (
+    build_prompt,
+    extract_json_object,
+    find_repeats,
+)
+
+
+class _FakeResponse:
+    def __init__(self, content):
+        self.content = content
+
+
+def _make_find_repeats_response(content):
+    return {"choices": [{"message": {"content": content}}]}
 
 
 class OpenRouterParserTest(unittest.TestCase):
@@ -41,6 +54,64 @@ class OpenRouterParserTest(unittest.TestCase):
         self.assertIn('Если дата окончания совпадает с "date", ставь "end_date": null', prompt)
         self.assertIn("place пиши как название площадки в именительном падеже", prompt)
         self.assertIn("Не считай постоянные услуги, товары, меню, скидки, обычный режим работы", prompt)
+
+    def test_find_repeats_returns_matched_original_ids(self):
+        from tg_event import openrouter_parser
+
+        new = [
+            {"title": "Концерт Х", "date": "2026-07-12", "place": "АУТ"},
+            {"title": "Лекция по ботанике", "date": "2026-07-13", "place": "Библиотека"},
+        ]
+        existing = [
+            {"id": 7, "title": "Х (большой концерт)", "date": "2026-07-12", "place": "АУТ, Кольцовская"},
+            {"id": 9, "title": "Винил-маркет", "date": "2026-07-12", "place": "Митбоулинг"},
+        ]
+
+        def fake_request(api_key, model, prompt):
+            return {"choices": [{"message": {"content": '{"0": 7, "1": null}'}}]}
+
+        original = openrouter_parser._request_openrouter
+        openrouter_parser._request_openrouter = fake_request
+        try:
+            result = find_repeats(
+                api_key="key",
+                model="m",
+                new_events=new,
+                existing_events=existing,
+            )
+        finally:
+            openrouter_parser._request_openrouter = original
+
+        self.assertEqual(result, [7, None])
+
+    def test_find_repeats_returns_none_when_no_existing(self):
+        result = find_repeats(
+            api_key="key",
+            model="m",
+            new_events=[{"title": "X", "date": "2026-07-12", "place": "Y"}],
+            existing_events=[],
+        )
+        self.assertEqual(result, [None])
+
+    def test_find_repeats_handles_request_error(self):
+        from tg_event import openrouter_parser
+
+        def fake_request(api_key, model, prompt):
+            raise ValueError("network error")
+
+        original = openrouter_parser._request_openrouter
+        openrouter_parser._request_openrouter = fake_request
+        try:
+            result = find_repeats(
+                api_key="key",
+                model="m",
+                new_events=[{"title": "X", "date": "2026-07-12", "place": "Y"}],
+                existing_events=[{"id": 1, "title": "X", "date": "2026-07-12", "place": "Y"}],
+            )
+        finally:
+            openrouter_parser._request_openrouter = original
+
+        self.assertEqual(result, [None])
 
 
 if __name__ == "__main__":

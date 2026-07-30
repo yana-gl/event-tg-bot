@@ -36,10 +36,10 @@ ALLOWED_CATEGORIES = {
 
 
 class EventStatus(str, Enum):
-    PENDING = "pending"
+    DRAFT = "draft"
     PUBLISHED = "published"
     REJECTED = "rejected"
-    NEEDS_REVIEW = "needs_review"
+    REPEAT = "repeat"
     NOT_EVENT = "not_event"
 
 
@@ -77,7 +77,7 @@ class ParsedEventResponse:
         }
 
 
-def validate_event(payload: dict[str, Any], confidence_threshold: float = 0.7) -> ParsedEvent:
+def validate_event(payload: dict[str, Any]) -> ParsedEvent:
     extra_fields = set(payload) - EVENT_FIELDS
     if extra_fields:
         names = ", ".join(sorted(extra_fields))
@@ -100,10 +100,8 @@ def validate_event(payload: dict[str, Any], confidence_threshold: float = 0.7) -
     is_event = bool(payload["is_event"])
     if not is_event:
         status = EventStatus.NOT_EVENT
-    elif confidence < confidence_threshold:
-        status = EventStatus.NEEDS_REVIEW
     else:
-        status = EventStatus.PENDING
+        status = EventStatus.DRAFT
 
     return ParsedEvent(
         is_event=is_event,
@@ -124,7 +122,6 @@ def validate_event(payload: dict[str, Any], confidence_threshold: float = 0.7) -
 
 def validate_event_response(
     payload: dict[str, Any],
-    confidence_threshold: float = 0.7,
 ) -> ParsedEventResponse:
     extra_fields = set(payload) - {"events", "post_reason"}
     if extra_fields:
@@ -139,7 +136,7 @@ def validate_event_response(
         raise ValueError("events must be a list")
 
     events = [
-        validate_event(event_payload, confidence_threshold=confidence_threshold)
+        validate_event(event_payload)
         for event_payload in payload["events"]
     ]
     return ParsedEventResponse(

@@ -30,17 +30,31 @@
 - `openrouter_parser.py` — отправка поста в LLM, валидация event-JSON.
 - `event_schema.py` — схема события (поля, категории, статусы).
 - `storage.py` — чтение/запись JSONL, `dated_path`.
-- `database.py` — SQLite: `connect_database`, `init_database`, `save_parsed_rows`.
+- `database.py` — SQLite: `connect_database`, `init_database`, `save_parsed_rows`, `fetch_published_events`.
 - `watcher.py` — цикл наблюдения за каналами, state в `data/state/channels.json`.
+- `bot.py` — бот на Telethon, inline-кнопки периодов, выдаёт опубликованные события.
 
 ### Схема SQLite
 
 Таблицы: `sources`, `raw_posts`, `post_links`, `events`. Связи по `source_id` и `raw_post_id`, `ON DELETE CASCADE`, `PRAGMA foreign_keys = ON`. Запись — upsert по `(source, message_id)`, links/events при перезаписи заменяются (delete + insert).
 
+Views (для удобства модерации в GUI):
+- `events_for_review` — только `draft`, последние сверху.
+- `events_current` — `published` с датой >= сегодня.
+- `events_outdated` — все события с прошедшей датой.
+
 ### Статусы и категории
 
-- Статусы назначаются локально: `pending` для confidence >= 0.7, иначе `needs_review`.
+- Все новые распарсенные события получают статус `draft`. После модерации ставится `published` (видно в боте) или `rejected`. Пост без события → `not_event`. Повтор уже существующего события → `repeat` (не виден в боте).
+- Дедупликация повторов: один LLM-запрос на цикл watcher к fallback-модели. Кандидаты выбираются из БД по датам новых событий (без фильтра по статусу). Найденные оригиналы проставляют новым событиям `status='repeat'` перед записью.
 - Допустимые категории: `music, cinema, lecture, exhibition, market, workshop, food, sport, party, kids, other`.
+
+### Бот
+
+- `tg_event/bot.py` — бот на Telethon (отдельная сессия `tg_event_bot`, токен `BOT_TOKEN`).
+- Команды: `/start` (inline-кнопки: сегодня / завтра / неделя / месяц), `/help`.
+- Бот показывает только события со статусом `published` в выбранном диапазоне дат.
+- Бот и watcher запускаются в одном asyncio-процессе командой `watch` (кроме `--once` — там только цикл watcher, без бота).
 
 ## Команды
 
@@ -127,7 +141,8 @@ python3 -m unittest discover -s tests
 
 ## Проектные конвенции
 
-- **Без новых зависимостей.** В `requirements.txt` только `telethon`. Всё остальное — стандартная библиотека. Если задача требует новой зависимости — обсуди.
+- **Без новых Python-зависимостей.** В `requirements.txt` только `telethon`. Всё остальное — стандартная библиотека. Если задача требует новой зависимости — обсуди.
+- **Исключение — админ-фронтенд `admin-ui/`.** Это Vue 3 + Vite + Pinia + Element Plus на Node-тулчейне. Единственное место в репо, где допускаются npm-зависимости и билд-степ. Запускается командой `serve` (`python -m tg_event.cli serve`); для прода нужен `cd admin-ui && npm run build` (собранный `dist/` отдаётся тем же Python-сервером, `dist/` в git не коммитится). Python-сторона админки (`tg_event/admin.py`, `tg_event/auth.py`) — stdlib-only.
 - **Без сторонних `.env`-парсеров.** Используй существующую `load_dotenv` из `tg_event/config.py`.
 - **Стиль:** `from __future__ import annotations`, dataclasses для конфигов, `Path` для путей, type hints.
 - **Комментарии:** не добавляй комментарии, если явно не просят.

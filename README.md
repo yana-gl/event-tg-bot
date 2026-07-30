@@ -147,7 +147,7 @@ Parsed rows include the raw post metadata plus:
       "price": "600р",
       "confidence": 0.86,
       "reason": "Почему модель решила, что это событие",
-      "status": "pending"
+      "status": "draft"
     }
   ],
   "links": [
@@ -165,10 +165,13 @@ If the post has no events, `events` is an empty list:
 }
 ```
 
-Statuses are assigned locally:
+Statuses:
 
-- `pending`: event with confidence >= 0.7
-- `needs_review`: event with confidence < 0.7
+- `draft`: all newly parsed events (awaiting moderation).
+- `published`: approved and visible in the bot.
+- `rejected`: declined.
+- `repeat`: duplicate of an existing event (not shown in the bot).
+- `not_event`: post contains no event.
 
 Allowed categories:
 

@@ -34,7 +34,7 @@ class DatabaseTest(unittest.TestCase):
         self.assertEqual(events[0]["title"], "Винил-маркет")
         self.assertEqual(events[0]["end_time"], "20:00")
         self.assertEqual(events[0]["category"], "market")
-        self.assertEqual(events[1]["status"], "needs_review")
+        self.assertEqual(events[1]["status"], "draft")
 
     def test_save_parsed_row_replaces_existing_events_for_same_post(self):
         row = parsed_row()
@@ -53,7 +53,7 @@ class DatabaseTest(unittest.TestCase):
                 "price": None,
                 "confidence": 0.8,
                 "reason": "Повторный парсинг.",
-                "status": "pending",
+                "status": "draft",
             }
         ]
 
@@ -90,7 +90,7 @@ def parsed_row():
                 "price": None,
                 "confidence": 0.95,
                 "reason": "Есть дата, время и место.",
-                "status": "pending",
+                "status": "draft",
             },
             {
                 "is_event": True,
@@ -105,7 +105,7 @@ def parsed_row():
                 "price": None,
                 "confidence": 0.5,
                 "reason": "Мало данных.",
-                "status": "needs_review",
+                "status": "draft",
             },
         ],
     }

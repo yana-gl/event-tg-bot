@@ -26,9 +26,9 @@ class EventSchemaTest(unittest.TestCase):
         self.assertIsNone(event.end_date)
         self.assertIsNone(event.end_time)
         self.assertEqual(event.price, "600р")
-        self.assertEqual(event.status, EventStatus.PENDING)
+        self.assertEqual(event.status, EventStatus.DRAFT)
 
-    def test_validate_event_marks_low_confidence_as_needs_review(self):
+    def test_validate_event_marks_low_confidence_as_draft(self):
         payload = {
             "is_event": True,
             "title": "Встреча",
@@ -46,7 +46,7 @@ class EventSchemaTest(unittest.TestCase):
 
         event = validate_event(payload)
 
-        self.assertEqual(event.status, EventStatus.NEEDS_REVIEW)
+        self.assertEqual(event.status, EventStatus.DRAFT)
 
     def test_validate_event_marks_non_event_as_not_event(self):
         payload = {
@@ -127,11 +127,11 @@ class EventSchemaTest(unittest.TestCase):
 
         self.assertEqual(response.post_reason, "Пост содержит подборку из двух событий.")
         self.assertEqual(len(response.events), 2)
-        self.assertEqual(response.events[0].status, EventStatus.PENDING)
+        self.assertEqual(response.events[0].status, EventStatus.DRAFT)
         self.assertEqual(response.events[1].end_date, "2026-07-12")
         self.assertEqual(response.events[1].end_time, "02:00")
         self.assertEqual(response.events[1].price, "1000р")
-        self.assertEqual(response.events[1].status, EventStatus.NEEDS_REVIEW)
+        self.assertEqual(response.events[1].status, EventStatus.DRAFT)
 
     def test_validate_event_response_accepts_empty_events(self):
         payload = {

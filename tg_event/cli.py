@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import time
 import re
 from pathlib import Path
+from typing import Any
 
 from tg_event.collector import collect_posts
 from tg_event.config import Settings
-from tg_event.database import connect_database, init_database, save_parsed_rows
-from tg_event.openrouter_parser import parse_event_with_openrouter
+from tg_event.database import (
+    connect_database,
+    fetch_candidate_events,
+    init_database,
+    save_parsed_rows,
+)
+from tg_event.openrouter_parser import find_repeats, parse_event_with_openrouter
 from tg_event.storage import dated_path, read_jsonl, write_jsonl
 from tg_event.watcher import (
     filter_new_posts,
@@ -24,8 +29,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Telegram event parser POC")
     parser.add_argument(
         "command",
-        choices=["collect", "parse", "run", "watch"],
-        help="collect raw posts, parse a raw file, do both, or watch for new posts",
+        choices=["collect", "parse", "run", "watch", "serve"],
+        help="collect raw posts, parse a raw file, do both, watch for new posts, or serve admin UI",
     )
     parser.add_argument("--input", type=Path, help="Raw JSONL file for parse command")
     parser.add_argument(
@@ -67,6 +72,22 @@ def main() -> None:
         default=10,
         help="Maximum new posts to parse per channel in one watch cycle",
     )
+    parser.add_argument(
+        "--host",
+        default=None,
+        help="Admin server host (default: 127.0.0.1 or ADMIN_HOST)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Admin server port (default: 8080 or ADMIN_PORT)",
+    )
+    parser.add_argument(
+        "--dev",
+        action="store_true",
+        help="Serve admin API only (use Vite dev server for the UI)",
+    )
     args = parser.parse_args()
 
     settings = Settings.from_env()
@@ -83,14 +104,23 @@ def main() -> None:
         parsed_path = _parse(settings, raw_path, limit=args.limit)
         print(parsed_path)
     elif args.command == "watch":
-        _watch(
+        asyncio.run(
+            _watch(
+                settings,
+                interval=args.interval,
+                once=args.once,
+                since_date=args.since,
+                state_path=args.state,
+                max_posts_per_cycle=args.max_posts_per_cycle,
+                max_posts_per_channel=args.max_posts_per_channel,
+            )
+        )
+    elif args.command == "serve":
+        _serve(
             settings,
-            interval=args.interval,
-            once=args.once,
-            since_date=args.since,
-            state_path=args.state,
-            max_posts_per_cycle=args.max_posts_per_cycle,
-            max_posts_per_channel=args.max_posts_per_channel,
+            host=args.host or settings.admin_host,
+            port=args.port or settings.admin_port,
+            dev=args.dev,
         )
 
 
@@ -111,7 +141,65 @@ def _parse(settings: Settings, raw_path: Path, limit: int | None = None) -> Path
     return path
 
 
-def _watch(
+async def _watch(
+    settings: Settings,
+    interval: int,
+    once: bool,
+    since_date: str,
+    state_path: Path,
+    max_posts_per_cycle: int | None,
+    max_posts_per_channel: int,
+) -> None:
+    if once:
+        await _watch_loop(
+            settings,
+            interval=interval,
+            once=True,
+            since_date=since_date,
+            state_path=state_path,
+            max_posts_per_cycle=max_posts_per_cycle,
+            max_posts_per_channel=max_posts_per_channel,
+        )
+        return
+
+    if not settings.bot_token:
+        raise SystemExit("BOT_TOKEN is required for watch")
+
+    from telethon import TelegramClient
+
+    from tg_event.bot import register_handlers
+
+    bot_client = TelegramClient(
+        settings.bot_session_name,
+        settings.telegram_api_id,
+        settings.telegram_api_hash,
+    )
+    await bot_client.start(bot_token=settings.bot_token)
+    register_handlers(bot_client, settings)
+    print("Bot started", flush=True)
+
+    watcher_task = asyncio.create_task(
+        _watch_loop(
+            settings,
+            interval=interval,
+            once=False,
+            since_date=since_date,
+            state_path=state_path,
+            max_posts_per_cycle=max_posts_per_cycle,
+            max_posts_per_channel=max_posts_per_channel,
+        )
+    )
+    try:
+        await bot_client.run_until_disconnected()
+    finally:
+        watcher_task.cancel()
+        try:
+            await watcher_task
+        except asyncio.CancelledError:
+            pass
+
+
+async def _watch_loop(
     settings: Settings,
     interval: int,
     once: bool,
@@ -121,8 +209,8 @@ def _watch(
     max_posts_per_channel: int,
 ) -> None:
     while True:
-        raw_path = asyncio.run(_collect(settings))
-        rows = read_jsonl(raw_path)
+        raw_path = await _collect(settings)
+        rows = await asyncio.to_thread(read_jsonl, raw_path)
         state = load_state(state_path)
         new_rows = filter_new_posts(
             rows,
@@ -135,10 +223,10 @@ def _watch(
         if new_rows:
             raw_new_path = dated_path(settings.raw_dir, "new-posts")
             write_jsonl(raw_new_path, new_rows)
-            parsed_rows = parse_rows(new_rows, settings, progress=print)
+            parsed_rows = await asyncio.to_thread(parse_rows, new_rows, settings, progress=print)
             parsed_path = dated_path(settings.parsed_dir, "events")
             write_jsonl(parsed_path, parsed_rows)
-            _save_to_database(settings, parsed_rows)
+            await asyncio.to_thread(_save_to_database, settings, parsed_rows)
             save_state(state_path, update_state(state, new_rows))
             print(f"Parsed {len(new_rows)} new posts: {parsed_path}")
         else:
@@ -146,7 +234,7 @@ def _watch(
 
         if once:
             return
-        time.sleep(interval)
+        await asyncio.sleep(interval)
 
 
 def parse_rows(
@@ -188,7 +276,33 @@ def parse_rows(
 def _save_to_database(settings: Settings, parsed_rows) -> None:
     with connect_database(settings.database_path) as connection:
         init_database(connection)
+        _mark_repeats(connection, settings, parsed_rows)
         save_parsed_rows(connection, parsed_rows)
+
+
+def _mark_repeats(connection, settings: Settings, parsed_rows) -> None:
+    flat: list[dict[str, Any]] = []
+    for row in parsed_rows:
+        for event in row["events"]:
+            if event.get("is_event") and event.get("status") != "not_event":
+                flat.append(event)
+    if not flat:
+        return
+
+    dates = sorted({event["date"] for event in flat if event.get("date")})
+    candidates = fetch_candidate_events(connection, dates)
+    if not candidates:
+        return
+
+    duplicate_ids = find_repeats(
+        api_key=settings.openrouter_api_key,
+        model=settings.openrouter_fallback_model,
+        new_events=flat,
+        existing_events=candidates,
+    )
+    for event, original_id in zip(flat, duplicate_ids):
+        if original_id is not None:
+            event["status"] = "repeat"
 
 
 def extract_links(text: str) -> list[str]:
@@ -206,6 +320,23 @@ def extract_links(text: str) -> list[str]:
             links.append(link)
             seen.add(link)
     return links
+
+
+def _serve(settings: Settings, host: str, port: int, dev: bool) -> None:
+    if not settings.admin_user or not settings.admin_password:
+        raise SystemExit("ADMIN_USER and ADMIN_PASSWORD are required for serve")
+
+    from tg_event.admin import serve as serve_admin
+    from tg_event.database import init_database
+
+    with connect_database(settings.database_path, check_same_thread=False) as connection:
+        init_database(connection)
+        if not dev and not (settings.admin_static_dir / "index.html").exists():
+            print(
+                "warning: admin-ui/dist not found; run `cd admin-ui && npm install && npm run build`",
+                flush=True,
+            )
+        serve_admin(settings, connection, host=host, port=port, dev=dev)
 
 
 if __name__ == "__main__":

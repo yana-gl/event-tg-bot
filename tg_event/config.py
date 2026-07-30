@@ -56,13 +56,21 @@ class Settings:
     openrouter_api_key: str
     openrouter_model: str
     openrouter_fallback_model: str
+    bot_token: str
     city: str
     channels: list[str]
+    admin_user: str = ""
+    admin_password: str = ""
+    admin_secret: str = ""
+    admin_static_dir: Path = Path("admin-ui/dist")
+    admin_host: str = "127.0.0.1"
+    admin_port: int = 8080
     posts_per_channel: int = 20
     raw_dir: Path = Path("data/raw")
     parsed_dir: Path = Path("data/parsed")
     database_path: Path = Path("data/tg_event.sqlite3")
     session_name: str = "tg_event"
+    bot_session_name: str = "tg_event_bot"
 
     @classmethod
     def from_env(cls, env_file: str = ".env") -> "Settings":
@@ -72,6 +80,7 @@ class Settings:
             telegram_api_hash=_required("TELEGRAM_API_HASH"),
             telegram_phone=_required("TELEGRAM_PHONE"),
             openrouter_api_key=_required("OPENROUTER_API_KEY"),
+            bot_token=os.getenv("BOT_TOKEN", "").strip(),
             openrouter_model=os.getenv("OPENROUTER_MODEL", DEFAULT_MODEL).strip(),
             openrouter_fallback_model=os.getenv(
                 "OPENROUTER_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL
@@ -83,4 +92,11 @@ class Settings:
             parsed_dir=Path(os.getenv("PARSED_DIR", "data/parsed")),
             database_path=Path(os.getenv("DATABASE_PATH", "data/tg_event.sqlite3")),
             session_name=os.getenv("TELEGRAM_SESSION", "tg_event").strip(),
+            bot_session_name=os.getenv("BOT_SESSION_NAME", "tg_event_bot").strip(),
+            admin_user=os.getenv("ADMIN_USER", "").strip(),
+            admin_password=os.getenv("ADMIN_PASSWORD", "").strip(),
+            admin_secret=os.getenv("ADMIN_SECRET", "").strip(),
+            admin_static_dir=Path(os.getenv("ADMIN_STATIC_DIR", "admin-ui/dist")),
+            admin_host=os.getenv("ADMIN_HOST", "127.0.0.1").strip(),
+            admin_port=int(os.getenv("ADMIN_PORT", "8080")),
         )

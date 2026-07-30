@@ -9,7 +9,7 @@ class FakeEvent:
         self.title = title
 
     def to_dict(self):
-        return {"title": self.title, "status": "pending"}
+        return {"title": self.title, "status": "draft"}
 
 
 class CliTest(unittest.TestCase):
