@@ -26,9 +26,9 @@ class EventSchemaTest(unittest.TestCase):
         self.assertIsNone(event.end_date)
         self.assertIsNone(event.end_time)
         self.assertEqual(event.price, "600р")
-        self.assertEqual(event.status, EventStatus.DRAFT)
+        self.assertEqual(event.status, EventStatus.PUBLISHED)
 
-    def test_validate_event_marks_low_confidence_as_draft(self):
+    def test_validate_event_marks_missing_date_as_draft(self):
         payload = {
             "is_event": True,
             "title": "Встреча",
@@ -127,11 +127,34 @@ class EventSchemaTest(unittest.TestCase):
 
         self.assertEqual(response.post_reason, "Пост содержит подборку из двух событий.")
         self.assertEqual(len(response.events), 2)
-        self.assertEqual(response.events[0].status, EventStatus.DRAFT)
+        self.assertEqual(response.events[0].status, EventStatus.PUBLISHED)
         self.assertEqual(response.events[1].end_date, "2026-07-12")
         self.assertEqual(response.events[1].end_time, "02:00")
         self.assertEqual(response.events[1].price, "1000р")
-        self.assertEqual(response.events[1].status, EventStatus.DRAFT)
+        self.assertEqual(response.events[1].status, EventStatus.PUBLISHED)
+
+    def test_auto_publication_requires_title_and_valid_date_range(self):
+        from test_database import parsed_row
+
+        payload = parsed_row()["events"][0]
+        payload.pop("status")
+        cases = [
+            ({"title": None}, EventStatus.DRAFT),
+            ({"title": "  "}, EventStatus.DRAFT),
+            ({"date": None}, EventStatus.DRAFT),
+            ({"date": "завтра или послезавтра"}, EventStatus.DRAFT),
+            ({"date": "2026-02-30"}, EventStatus.DRAFT),
+            ({"date": "2026-7-12"}, EventStatus.DRAFT),
+            ({"end_date": "2026-07-11"}, EventStatus.DRAFT),
+            ({"end_date": "неизвестно"}, EventStatus.DRAFT),
+            ({"end_date": "2026-07-15"}, EventStatus.PUBLISHED),
+            ({"confidence": 0.1, "time": None, "end_time": None,
+              "place": None, "address": None, "price": None}, EventStatus.PUBLISHED),
+            ({"is_event": False}, EventStatus.NOT_EVENT),
+        ]
+        for changes, expected in cases:
+            with self.subTest(changes=changes):
+                self.assertEqual(validate_event(dict(payload, **changes)).status, expected)
 
     def test_validate_event_response_accepts_empty_events(self):
         payload = {
@@ -162,6 +185,14 @@ class EventSchemaTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "category"):
             validate_event(payload)
+
+    def test_explicit_organizer_is_optional_and_preserved(self):
+        from test_database import parsed_row
+
+        payload = parsed_row()["events"][0]
+        payload.pop("status")
+        self.assertIsNone(validate_event(payload).organizer)
+        self.assertEqual(validate_event(dict(payload, organizer="Джаз Клуб")).organizer, "Джаз Клуб")
 
 
 if __name__ == "__main__":

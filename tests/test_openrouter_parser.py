@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from tg_event.openrouter_parser import (
     build_prompt,
@@ -112,6 +113,17 @@ class OpenRouterParserTest(unittest.TestCase):
             openrouter_parser._request_openrouter = original
 
         self.assertEqual(result, [None])
+
+    def test_invalid_or_unknown_matches_are_ignored(self):
+        for content in ('not json', '{"0": 12345}', '{"0": true}', '{"0": 7.5}'):
+            with self.subTest(content=content), patch(
+                "tg_event.openrouter_parser._request_openrouter",
+                return_value=_make_find_repeats_response(content),
+            ):
+                self.assertEqual(find_repeats(
+                    api_key="test", model="test", new_events=[{"title": "X"}],
+                    existing_events=[{"id": 7, "title": "X"}],
+                ), [None])
 
 
 if __name__ == "__main__":

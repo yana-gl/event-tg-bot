@@ -16,6 +16,8 @@ class RawPost:
     url: str | None
     links: list[str]
     city: str
+    edited_at: str | None = None
+    tracked_only: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -40,5 +42,5 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def dated_path(directory: Path, prefix: str) -> Path:
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     return directory / f"{prefix}-{stamp}.jsonl"

@@ -35,7 +35,6 @@ def default_settings(**overrides) -> Settings:
         "openrouter_fallback_model": "f",
         "bot_token": "",
         "city": "Воронеж",
-        "channels": ["events_vrn"],
     }
     base.update(overrides)
     return Settings(**base)

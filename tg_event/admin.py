@@ -10,11 +10,13 @@ from urllib.parse import urlparse
 
 from tg_event.auth import issue_token, verify_token
 from tg_event.config import Settings
+from tg_event.channels import add_channel, list_channels, update_channel
 from tg_event.database import (
     fetch_event_detail,
     fetch_events_by_status,
     update_event,
     delete_event,
+    merge_events,
 )
 from tg_event.event_schema import ALLOWED_CATEGORIES, EventStatus
 
@@ -25,7 +27,7 @@ EDITABLE_STATUSES = {
     EventStatus.REJECTED.value,
     EventStatus.NOT_EVENT.value,
 }
-EVENT_LIST_STATUSES = EDITABLE_STATUSES | {EventStatus.REPEAT.value}
+EVENT_LIST_STATUSES = EDITABLE_STATUSES | {EventStatus.REPEAT.value, "exceptions", "conflicts"}
 
 _IGNORE_FIELDS = {"is_event", "confidence", "reason", "raw_post_id"}
 
@@ -48,6 +50,9 @@ class AdminHandler(BaseHTTPRequestHandler):
         if path == "/api/events":
             self._handle_list()
             return
+        if path == "/api/channels":
+            self._handle_channels()
+            return
         if path.startswith("/api/events/"):
             self._handle_detail(path)
             return
@@ -58,8 +63,14 @@ class AdminHandler(BaseHTTPRequestHandler):
         if path == "/api/login":
             self._handle_login()
             return
+        if path == "/api/channels" or path.startswith("/api/channels/"):
+            self._handle_channels(update=True)
+            return
         if path.startswith("/api/events/") and path.endswith("/delete"):
             self._handle_delete(path)
+            return
+        if path.startswith("/api/events/") and path.endswith("/merge"):
+            self._handle_merge(path)
             return
         if path.startswith("/api/events/"):
             self._handle_update(path)
@@ -75,6 +86,35 @@ class AdminHandler(BaseHTTPRequestHandler):
             return json.loads(raw)
         except json.JSONDecodeError:
             raise _ApiError(400, "invalid json")
+
+    def _handle_channels(self, update: bool = False) -> None:
+        if self._require_auth() is None:
+            self._send_json({"error": "unauthorized"}, status=401)
+            return
+        if not update:
+            self._send_json({"items": list_channels(self.db)})
+            return
+        try:
+            payload = self._read_body()
+            if not isinstance(payload, dict):
+                raise ValueError("Ожидается объект с настройками канала")
+            path = urlparse(self.path).path
+            if path == "/api/channels":
+                if set(payload) - {"username", "initial_posts"}:
+                    raise ValueError("Укажите канал и число постов первой загрузки")
+                name = add_channel(self.db, payload.get("username"), payload.get("initial_posts", 20))
+            else:
+                name = path.removeprefix("/api/channels/")
+                if not update_channel(self.db, name, payload):
+                    self._send_json({"error": "Канал не найден"}, status=404)
+                    return
+        except _ApiError as err:
+            self._send_json({"error": err.message}, status=err.status)
+            return
+        except ValueError as err:
+            self._send_json({"error": str(err)}, status=400)
+            return
+        self._send_json({"ok": True, "username": name})
 
     def _handle_login(self) -> None:
         try:
@@ -106,7 +146,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "unauthorized"}, status=401)
             return
         query = urlparse(self.path).query
-        status = _query_value(query, "status") or "draft"
+        status = _query_value(query, "status") or "exceptions"
         if status not in EVENT_LIST_STATUSES:
             self._send_json({"error": "invalid status"}, status=400)
             return
@@ -141,6 +181,10 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send_json({"error": err.message}, status=err.status)
             return
         clean = {k: v for k, v in payload.items() if k not in _IGNORE_FIELDS}
+        resolution = clean.pop("resolve_conflict", None)
+        if resolution is not None and not isinstance(resolution, dict):
+            self._send_json({"error": "invalid conflict resolution"}, status=400)
+            return
         for empty_key in ("title", "place", "address", "price"):
             if clean.get(empty_key) == "":
                 clean[empty_key] = None
@@ -152,7 +196,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "validation", "details": errors}, status=400)
             return
         try:
-            ok = update_event(self.db, event_id, clean)
+            ok = update_event(self.db, event_id, clean, resolve_conflict=resolution)
         except ValueError as err:
             self._send_json({"error": str(err)}, status=400)
             return
@@ -160,6 +204,30 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "not found"}, status=404)
             return
         self._send_json({"ok": True})
+
+    def _handle_merge(self, path: str) -> None:
+        if self._require_auth() is None:
+            self._send_json({"error": "unauthorized"}, status=401)
+            return
+        event_id = _path_id(path, suffix="/merge")
+        if event_id is None:
+            self._send_json({"error": "invalid id"}, status=404)
+            return
+        try:
+            target_id = self._read_body().get("target_id")
+            if type(target_id) is not int or target_id <= 0:
+                raise ValueError("target_id must be a positive integer")
+            ok = merge_events(self.db, event_id, target_id)
+        except _ApiError as err:
+            self._send_json({"error": err.message}, status=err.status)
+            return
+        except ValueError as err:
+            self._send_json({"error": str(err)}, status=400)
+            return
+        if not ok:
+            self._send_json({"error": "not found"}, status=404)
+            return
+        self._send_json({"ok": True, "target_id": target_id})
 
     def _handle_delete(self, path: str) -> None:
         if self._require_auth() is None:
@@ -247,6 +315,8 @@ def _query_value(query: str, key: str) -> str | None:
 
 def _validate_fields(fields: dict[str, Any]) -> list[str]:
     errors: list[str] = []
+    if "event_state" in fields and fields["event_state"] not in {"scheduled", "postponed", "cancelled"}:
+        errors.append("event_state must be scheduled, postponed or cancelled")
     if "status" in fields and fields["status"] not in EDITABLE_STATUSES:
         errors.append("status must be one of: draft, published, rejected, not_event")
     if "category" in fields:

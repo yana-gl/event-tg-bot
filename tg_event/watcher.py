@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+import os
+import tempfile
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -19,10 +21,14 @@ def load_state(path: Path) -> dict[str, int]:
 
 def save_state(path: Path, state: dict[str, int]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    os.close(descriptor)
+    temporary = Path(name)
+    try:
+        temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def filter_new_posts(
@@ -31,17 +37,28 @@ def filter_new_posts(
     since_date: str,
     max_posts_per_channel: int | None = None,
     max_posts_per_cycle: int | None = None,
+    known_posts: dict | None = None,
 ) -> list[dict[str, Any]]:
     selected = []
     for row in rows:
-        if _post_date(row["published_at"]) < since_date:
+        known = (known_posts or {}).get((row["source"], int(row["message_id"])))
+        if known is not None and _version_time(row) < _version_time(known):
+            continue
+        if known is not None and row["text"] == known["text"] and row.get("edited_at") == known.get("edited_at"):
+            continue
+        changed = known is not None and (
+            row["text"] != known["text"] or row.get("edited_at") != known.get("edited_at")
+        )
+        if changed:
+            changed = _version_time(row) >= _version_time(known)
+        if not changed and row["source"] not in state and _post_date(row["published_at"]) < since_date:
             continue
         last_message_id = state.get(row["source"], 0)
-        if int(row["message_id"]) <= last_message_id:
+        if not changed and int(row["message_id"]) <= last_message_id:
             continue
         selected.append(row)
 
-    selected.sort(key=lambda row: (row["published_at"], row["source"], int(row["message_id"])))
+    selected.sort(key=lambda row: (_version_time(row), row["source"], int(row["message_id"])))
     if max_posts_per_channel is not None:
         selected = _limit_per_channel(selected, max_posts_per_channel)
     if max_posts_per_cycle is not None:
@@ -77,3 +94,9 @@ def update_state(state: dict[str, int], rows: list[dict[str, Any]]) -> dict[str,
 def _post_date(value: str) -> str:
     normalized = value.replace("Z", "+00:00")
     return datetime.fromisoformat(normalized).date().isoformat()
+
+
+def _version_time(row: dict[str, Any]) -> datetime:
+    value = row.get("edited_at") or row["published_at"]
+    stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return stamp.replace(tzinfo=stamp.tzinfo or timezone.utc).astimezone(timezone.utc)

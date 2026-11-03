@@ -22,25 +22,6 @@ def load_dotenv(path: str = ".env") -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
-def parse_channels(raw: str) -> list[str]:
-    channels: list[str] = []
-    for item in raw.split(","):
-        channel = item.strip()
-        if channel.startswith("https://t.me/"):
-            channel = channel.removeprefix("https://t.me/")
-        elif channel.startswith("http://t.me/"):
-            channel = channel.removeprefix("http://t.me/")
-        elif channel.startswith("t.me/"):
-            channel = channel.removeprefix("t.me/")
-        channel = channel.strip().removeprefix("@").strip("/")
-        if channel:
-            channels.append(channel)
-
-    if not channels:
-        raise ValueError("CHANNELS must contain at least one Telegram channel")
-    return channels
-
-
 def _required(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
@@ -58,7 +39,6 @@ class Settings:
     openrouter_fallback_model: str
     bot_token: str
     city: str
-    channels: list[str]
     admin_user: str = ""
     admin_password: str = ""
     admin_secret: str = ""
@@ -71,6 +51,8 @@ class Settings:
     database_path: Path = Path("data/tg_event.sqlite3")
     session_name: str = "tg_event"
     bot_session_name: str = "tg_event_bot"
+    source_rules_path: Path = Path("source_rules.json")
+    event_timezone: str = "Asia/Vladivostok"
 
     @classmethod
     def from_env(cls, env_file: str = ".env") -> "Settings":
@@ -85,8 +67,7 @@ class Settings:
             openrouter_fallback_model=os.getenv(
                 "OPENROUTER_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL
             ).strip(),
-            city=os.getenv("CITY", "Воронеж").strip(),
-            channels=parse_channels(_required("CHANNELS")),
+            city=os.getenv("CITY", "Владивосток").strip(),
             posts_per_channel=int(os.getenv("POSTS_PER_CHANNEL", "20")),
             raw_dir=Path(os.getenv("RAW_DIR", "data/raw")),
             parsed_dir=Path(os.getenv("PARSED_DIR", "data/parsed")),
@@ -99,4 +80,6 @@ class Settings:
             admin_static_dir=Path(os.getenv("ADMIN_STATIC_DIR", "admin-ui/dist")),
             admin_host=os.getenv("ADMIN_HOST", "127.0.0.1").strip(),
             admin_port=int(os.getenv("ADMIN_PORT", "8080")),
+            source_rules_path=Path(os.getenv("SOURCE_RULES_PATH", "source_rules.json")),
+            event_timezone=os.getenv("EVENT_TIMEZONE", "Asia/Vladivostok").strip(),
         )

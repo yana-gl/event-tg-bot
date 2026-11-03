@@ -78,6 +78,23 @@ class WatcherTest(unittest.TestCase):
 
         self.assertEqual(state, {"events_vrn": 103, "avanturacoffee": 10})
 
+    def test_edit_is_selected_despite_old_date_and_processed_id(self):
+        row = post("events_vrn", 1, "2026-07-01T10:00:00+00:00")
+        row["edited_at"] = "2026-07-10T10:00:00+00:00"
+        known = {("events_vrn", 1): dict(row, edited_at=None)}
+        result = filter_new_posts([row], {"events_vrn": 100}, "2026-07-10", known_posts=known)
+        self.assertEqual(result, [row])
+        self.assertEqual(update_state({"events_vrn": 100}, result), {"events_vrn": 100})
+
+    def test_identical_or_stale_version_is_not_reparsed(self):
+        row = post("events_vrn", 1, "2026-07-01T10:00:00+00:00")
+        row["edited_at"] = "2026-07-10T10:00:00+00:00"
+        known = {("events_vrn", 1): dict(row)}
+        self.assertEqual(filter_new_posts([row], {"events_vrn": 100}, "2026-07-10", known_posts=known), [])
+        row["edited_at"] = None
+        row["text"] = "old version"
+        self.assertEqual(filter_new_posts([row], {"events_vrn": 100}, "2026-07-10", known_posts=known), [])
+
 
 if __name__ == "__main__":
     unittest.main()

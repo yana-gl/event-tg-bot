@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { useEventsStore, STATUSES } from '../stores/events'
+import { useEventsStore, STATUSES, EVENT_STATES } from '../stores/events'
 import { useAuthStore } from '../stores/auth'
 import { ElMessage } from 'element-plus'
 
@@ -48,6 +48,7 @@ onMounted(() => {
     <header class="topbar">
       <span class="title">События</span>
       <div class="right">
+        <el-button @click="router.push({ name: 'channels' })">Каналы</el-button>
         <el-tag v-if="auth.user" type="info">{{ auth.user }}</el-tag>
         <el-button text @click="logout">Выйти</el-button>
       </div>
@@ -72,6 +73,12 @@ onMounted(() => {
       <el-table-column label="Статус" width="120">
         <template #default="{ row }"><el-tag>{{ row.status }}</el-tag></template>
       </el-table-column>
+      <el-table-column label="Состояние" min-width="180">
+        <template #default="{ row }">{{ EVENT_STATES[row.event_state] || row.event_state }}</template>
+      </el-table-column>
+      <el-table-column label="Проверка" width="160">
+        <template #default="{ row }"><el-tag v-if="row.conflict_post_id" type="warning">Спорное изменение</el-tag></template>
+      </el-table-column>
     </el-table>
     <div v-if="!store.loading && !store.items.length" class="empty">Нет событий в этом статусе.</div>
   </div>
@@ -83,4 +90,5 @@ onMounted(() => {
 .title { font-size: 20px; font-weight: 600; }
 .filters { margin-bottom: 16px; }
 .empty { color: #909399; padding: 24px; text-align: center; }
+@media (max-width: 600px) { .page { padding: 16px 12px; } }
 </style>

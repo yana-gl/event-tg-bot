@@ -12,7 +12,7 @@ from tg_event.event_schema import ParsedEvent, validate_event_response
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
-def build_prompt(text: str, published_at: str, source: str, city: str) -> str:
+def build_prompt(text: str, published_at: str, source: str, city: str, edited_at: str | None = None) -> str:
     return f"""
 Ты извлекаешь события из постов публичных Telegram-каналов для афиши города.
 
@@ -20,6 +20,7 @@ def build_prompt(text: str, published_at: str, source: str, city: str) -> str:
 - город: {city}
 - источник: {source}
 - дата публикации: {published_at}
+- дата редактирования: {edited_at or 'нет'}
 
 Верни только строгий JSON без Markdown и комментариев.
 Схема:
@@ -34,6 +35,11 @@ def build_prompt(text: str, published_at: str, source: str, city: str) -> str:
       "end_time": "HH:MM" | null,
       "place": string | null,
       "address": string | null,
+      "organizer": string | null,
+      "action": "announcement" | "update" | "reschedule" | "cancel",
+      "previous_date": "YYYY-MM-DD" | null,
+      "previous_time": "HH:MM" | null,
+      "changed_fields": ["date", "time"],
       "category": "music" | "cinema" | "lecture" | "exhibition" | "market" | "workshop" | "food" | "sport" | "party" | "kids" | "other",
       "price": string | null,
       "confidence": number,
@@ -46,17 +52,22 @@ def build_prompt(text: str, published_at: str, source: str, city: str) -> str:
 Правила:
 - Один Telegram-пост может содержать 0, 1 или много событий.
 - Для каждого найденного события добавь отдельный объект в "events".
-- Если в посте нет конкретных событий для посещения, верни пустой массив "events": [].
+- Если в посте нет анонсов событий или сообщений об их изменении, верни пустой массив "events": [].
 - Внутри массива "events" поле "is_event" всегда true.
+- Сообщения об отмене, переносе и уточнении тоже включай в events, даже если данных мало. action: announcement — обычный анонс/повтор; cancel — явная отмена; reschedule — явный перенос, в том числе без новой даты; update — явное уточнение или возобновление после переноса без даты.
+- date и time для переноса — новые значения. previous_date/previous_time заполняй только если явно названы прежние дата/сеанс. При переносе без точной даты date=null. Не заполняй её старой датой.
+- changed_fields содержит только явно изменяемые поля из title,date,end_date,time,end_time,place,address,price,category. Для обычного анонса и отмены — []. Отсутствие даты в обычном анонсе само по себе не перенос. "Следующая неделя" без точного дня не даёт точной новой даты.
 - Если дата относительная, интерпретируй её относительно даты публикации.
+- В отредактированном посте не сдвигай неизменённое «завтра» автоматически к дате правки. Явно новую относительную дату переноса интерпретируй относительно даты редактирования. Если контекст не позволяет выбрать дату, используй null.
 - Если событие длится несколько дней, заполни "date" датой начала и "end_date" датой окончания.
 - Если дата окончания совпадает с "date", ставь "end_date": null.
 - Если указано время окончания, заполни "end_time"; если только время начала, "end_time": null.
 - Если указана стоимость или вход свободный, заполни "price" исходной короткой формулировкой.
 - Категория должна быть только одной из: music, cinema, lecture, exhibition, market, workshop, food, sport, party, kids, other.
 - place пиши как название площадки в именительном падеже, без предлогов "в", "на", "у" и без падежных форм.
+- organizer — явно названный организатор мероприятия. Не считай автора канала организатором только потому, что он опубликовал анонс. Если организатор не указан, верни null.
 - Не считай постоянные услуги, товары, меню, скидки, обычный режим работы и просто места событием.
-- Событие должно иметь конкретную дату или ограниченный период проведения, а не только расписание работы места.
+- Обычный анонс должен иметь конкретную дату или ограниченный период проведения, а не только расписание работы места. Для отмены или переноса отсутствие точной даты допустимо: сохрани сообщение об изменении с неизвестными полями null.
 - Если данных нет или они неоднозначны, используй null и снижай confidence.
 - confidence должен быть от 0 до 1.
 
@@ -95,12 +106,14 @@ def parse_event_with_openrouter(
     published_at: str,
     source: str,
     city: str,
+    edited_at: str | None = None,
 ) -> list[ParsedEvent]:
     prompt = build_prompt(
         text=text,
         published_at=published_at,
         source=source,
         city=city,
+        edited_at=edited_at,
     )
 
     try:
@@ -153,12 +166,14 @@ def find_repeats(
     prompt = build_dedupe_prompt(new_events, existing_events)
     try:
         payload = _request_openrouter(api_key=api_key, model=model, prompt=prompt)
-    except (ValueError, urllib.error.HTTPError, urllib.error.URLError):
+        content = payload["choices"][0]["message"]["content"]
+        mapping = _parse_dedupe_response(content, expected=len(new_events))
+    except (ValueError, KeyError, IndexError, TypeError, urllib.error.HTTPError, urllib.error.URLError):
         return [None] * len(new_events)
 
-    content = payload["choices"][0]["message"]["content"]
-    mapping = _parse_dedupe_response(content, expected=len(new_events))
-    return [mapping.get(str(index)) for index in range(len(new_events))]
+    valid_ids = {row["id"] for row in existing_events}
+    return [mapping.get(str(index)) if mapping.get(str(index)) in valid_ids else None
+            for index in range(len(new_events))]
 
 
 def build_dedupe_prompt(
@@ -175,6 +190,9 @@ def build_dedupe_prompt(
 {json.dumps(_compact_new(new_events), ensure_ascii=False, indent=2)}
 
 Повтор — это событие, которое анонсирует ту же фактическую активность: та же дата и то же место (по смыслу, а не по точной строке), похожий заголовок (по смыслу). Не считай повтором совпадение только по дате или только по категории.
+Для action cancel/reschedule/update или edited=true сопоставляй изменение с исходным мероприятием, даже если новая дата/время/место отличаются. Учитывай previous_date/previous_time, источник, message_id и прежние announcements кандидатов. Одинаковый пост дайджеста не делает разные события одним: выбирай конкретное мероприятие/сеанс. Если непонятно, какого из нескольких событий касается отмена, верни null. Обычный повтор может относиться к прежнему анонсу уже перенесённого события, но не означает отмену переноса.
+Разные сеансы одного мероприятия с разным временем не объединяй. Если уверенного совпадения нет, верни null.
+Отрицательные id обозначают события текущего пакета: -1 — индекс 0, -2 — индекс 1 и так далее. Для нового события можно выбрать только более раннее событие пакета (например, для индекса 2 — -1 или -2). Нельзя ссылаться на себя или последующие события.
 
 Верни только строгий JSON без Markdown и комментариев.
 Формат: объект, где ключ — индекс нового события (как строка), значение — id существующего события-оригинала (число) или null, если повтора нет.
@@ -188,7 +206,14 @@ def _compact_existing(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "id": row["id"],
             "title": row.get("title"),
             "date": row.get("date"),
+            "time": row.get("time"),
             "place": row.get("place"),
+            "source": row.get("source") or row.get("_source"),
+            "message_id": row.get("message_id", row.get("_message_id")),
+            "event_state": row.get("event_state"),
+            "previous_date": row.get("previous_date"),
+            "announcements": [{k: e.get(k) for k in ("title", "date", "time", "place")}
+                              for e in row.get("announcements", [])],
         }
         for row in rows
     ]
@@ -200,7 +225,14 @@ def _compact_new(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "index": index,
             "title": event.get("title"),
             "date": event.get("date"),
+            "time": event.get("time"),
             "place": event.get("place"),
+            "action": event.get("action", "announcement"),
+            "previous_date": event.get("previous_date"),
+            "previous_time": event.get("previous_time"),
+            "edited": event.get("_is_edit", False),
+            "source": event.get("_source"),
+            "message_id": event.get("_message_id"),
         }
         for index, event in enumerate(rows)
     ]
@@ -211,9 +243,12 @@ def _parse_dedupe_response(text: str, expected: int) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         return {}
     mapping: dict[str, Any] = {}
+    valid_keys = {str(index) for index in range(expected)}
     for key, value in parsed.items():
+        if str(key) not in valid_keys:
+            continue
         if value is None:
             mapping[str(key)] = None
-        elif isinstance(value, (int, float)):
-            mapping[str(key)] = int(value)
+        elif type(value) is int:
+            mapping[str(key)] = value
     return mapping

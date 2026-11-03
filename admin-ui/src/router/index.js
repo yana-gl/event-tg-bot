@@ -2,6 +2,11 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { getToken } from '../api/client'
 
 const routes = [
+  {
+    path: '/channels',
+    name: 'channels',
+    component: () => import('../views/Channels.vue')
+  },
   { path: '/', redirect: '/events' },
   {
     path: '/login',

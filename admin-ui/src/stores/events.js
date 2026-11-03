@@ -1,7 +1,15 @@
 import { defineStore } from 'pinia'
 import { apiGet, apiPost } from '../api/client'
 
+export const EVENT_STATES = {
+  scheduled: 'Запланировано',
+  postponed: 'Перенесено без даты',
+  cancelled: 'Отменено'
+}
+
 export const STATUSES = [
+  { value: 'exceptions', label: 'Требуют внимания' },
+  { value: 'conflicts', label: 'Спорные изменения' },
   { value: 'draft', label: 'Черновики' },
   { value: 'published', label: 'Опубликовано' },
   { value: 'rejected', label: 'Отклонено' },
@@ -11,7 +19,7 @@ export const STATUSES = [
 
 export const useEventsStore = defineStore('events', {
   state: () => ({
-    status: 'draft',
+    status: 'exceptions',
     items: [],
     loading: false,
     detail: null,
@@ -48,6 +56,9 @@ export const useEventsStore = defineStore('events', {
     },
     async remove(id) {
       return apiPost(`/api/events/${id}/delete`, {})
+    },
+    async merge(id, targetId) {
+      return apiPost(`/api/events/${id}/merge`, { target_id: targetId })
     }
   }
 })
