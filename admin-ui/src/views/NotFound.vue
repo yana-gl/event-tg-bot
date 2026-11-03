@@ -5,8 +5,8 @@ const router = useRouter()
 
 <template>
   <div class="nf">
-    <h2>404 — страница не найдена</h2>
-    <el-button type="primary" @click="router.push({ name: 'events' })">К списку событий</el-button>
+    <h1 class="page-title">404 — страница не найдена</h1>
+    <va-button @click="router.push({ name: 'events' })">К списку событий</va-button>
   </div>
 </template>
 

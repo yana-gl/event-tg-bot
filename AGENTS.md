@@ -195,7 +195,7 @@ python3 -m unittest discover -s tests
 - **Будущая обработка дублей и обновлений:** перед задачами о дедупликации, выборе основного источника, переносах и отменах прочитай [EVENT_DUPLICATES.md](EVENT_DUPLICATES.md). Там зафиксированы целевое поведение и открытые вопросы; это не описание текущей реализации и не поручение реализовать всё сразу.
 
 - **Без новых Python-зависимостей.** В `requirements.txt` только `telethon`. Всё остальное — стандартная библиотека. Если задача требует новой зависимости — обсуди.
-- **Исключение — админ-фронтенд `admin-ui/`.** Это Vue 3 + Vite + Pinia + Element Plus на Node-тулчейне. Единственное место в репо, где допускаются npm-зависимости и билд-степ. Запускается командой `serve` (`python -m tg_event.cli serve`); для прода нужен `cd admin-ui && npm run build` (собранный `dist/` отдаётся тем же Python-сервером, `dist/` в git не коммитится). Python-сторона админки (`tg_event/admin.py`, `tg_event/auth.py`) — stdlib-only.
+- **Исключение — админ-фронтенд `admin-ui/`.** Это Vue 3 + Vite + Pinia + Vuestic UI с оболочкой и темой из Vuestic Admin на Node-тулчейне. Единственное место в репо, где допускаются npm-зависимости и билд-степ. Запускается командой `serve` (`python -m tg_event.cli serve`); для прода нужен `cd admin-ui && npm run build` (собранный `dist/` отдаётся тем же Python-сервером, `dist/` в git не коммитится). Python-сторона админки (`tg_event/admin.py`, `tg_event/auth.py`) — stdlib-only.
 - **Без сторонних `.env`-парсеров.** Используй существующую `load_dotenv` из `tg_event/config.py`.
 - **Стиль:** `from __future__ import annotations`, dataclasses для конфигов, `Path` для путей, type hints.
 - **Комментарии:** не добавляй комментарии, если явно не просят.

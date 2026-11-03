@@ -1,0 +1,61 @@
+body {
+  margin: 0;
+  background: var(--va-background-primary);
+  color: var(--va-text-primary);
+  font-size: 14px;
+  line-height: 1.5;
+  --va-font-family: 'Inter', sans-serif;
+  --va-checkbox-font-size: 0.875rem;
+  --va-card-box-shadow: none;
+  --va-card-padding: 1rem;
+}
+
+* { box-sizing: border-box; }
+button, input, textarea, select { font: inherit; }
+a { color: var(--va-primary); }
+.page { min-width: 0; }
+.page-title { font-size: 40px; font-weight: 700; line-height: 1.2; margin: 0 0 24px; }
+.page-description { color: var(--va-secondary); margin: -12px 0 24px; }
+.toolbar, .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.toolbar { justify-content: space-between; margin-bottom: 20px; }
+.muted { color: var(--va-secondary); }
+.table-wrapper { min-width: 0; overflow-x: auto; }
+.va-data-table { --va-data-table-thead-background: var(--va-background-primary); }
+.va-data-table__table-td { vertical-align: middle; }
+.stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+.stack > * { min-width: 0; }
+.form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.form-grid > .full-width { grid-column: 1 / -1; }
+.va-input, .va-select { min-width: 0; width: 100%; }
+.va-input-label { font-size: 9px; line-height: 14px; letter-spacing: 0.4px; min-height: 14px; }
+.va-input-wrapper__size-keeper { height: auto; }
+.va-input-wrapper__label--outer { margin-bottom: 4px; }
+.va-input-wrapper__field { padding: 8px 12px; }
+.va-sidebar-item { text-decoration: none; }
+.va-sidebar__item__content { min-height: 44px; }
+.va-card__title { padding-bottom: calc(var(--va-card-padding) / 2); }
+.va-modal__dialog { border-radius: 4px; }
+.va-modal__message { margin-bottom: 16px; line-height: 20px; }
+.material-icons {
+  font-family: 'Material Icons';
+  font-weight: normal;
+  font-style: normal;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  font-feature-settings: 'liga';
+  -webkit-font-smoothing: antialiased;
+}
+.text-block { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--va-background-primary); padding: 16px; border-radius: 4px; font-size: 13px; line-height: 1.6; margin: 12px 0; }
+.kv { margin: 8px 0; overflow-wrap: anywhere; }
+.va-divider { margin: 24px 0; }
+.loading-state { padding: 48px; text-align: center; }
+@media (max-width: 640px) {
+  .page-title { font-size: 32px; }
+  .form-grid { grid-template-columns: minmax(0, 1fr); }
+  .toolbar { align-items: stretch; }
+  .toolbar > .va-select { width: 100%; }
+}

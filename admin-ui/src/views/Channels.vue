@@ -1,10 +1,9 @@
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { useToast } from 'vuestic-ui'
 import { apiGet, apiPost } from '../api/client'
 
-const router = useRouter()
+const { init: notify } = useToast()
 const items = ref([])
 const loading = ref(false)
 const saving = ref(false)
@@ -13,13 +12,21 @@ const INITIAL_STATUSES = {
   pending: 'Ожидает первой загрузки', loading: 'Первая загрузка идёт',
   complete: 'Первая загрузка завершена', existing: 'Ранее настроенный сбор'
 }
+const columns = [
+  { key: 'username', label: 'Канал', width: '160px' },
+  { key: 'enabled', label: 'Сбор', width: '220px' },
+  { key: 'initial_posts', label: 'Первая загрузка', width: '240px' },
+  { key: 'last_attempt_at', label: 'Последняя попытка', width: '180px' },
+  { key: 'last_success_at', label: 'Telegram проверен', width: '180px' },
+  { key: 'last_error', label: 'Ошибка', width: '220px' }
+]
 
 async function refresh() {
   loading.value = true
   try {
     items.value = (await apiGet('/api/channels')).items
   } catch (e) {
-    ElMessage.error(e.message)
+    notify({ message: e.message, color: 'danger' })
   } finally {
     loading.value = false
   }
@@ -31,9 +38,9 @@ async function add() {
     await apiPost('/api/channels', { ...form })
     form.username = ''
     await refresh()
-    ElMessage.success('Канал добавлен. Сбор начнётся в следующем цикле watcher')
+    notify({ message: 'Канал добавлен. Сбор начнётся при следующей проверке', color: 'success' })
   } catch (e) {
-    ElMessage.error(e.message)
+    notify({ message: e.message, color: 'danger' })
   } finally {
     saving.value = false
   }
@@ -44,9 +51,9 @@ async function update(row, fields) {
   try {
     await apiPost(`/api/channels/${row.username}`, fields)
     await refresh()
-    ElMessage.success('Настройки сохранены')
+    notify({ message: 'Настройки сохранены', color: 'success' })
   } catch (e) {
-    ElMessage.error(e.message)
+    notify({ message: e.message, color: 'danger' })
     await refresh()
   } finally {
     saving.value = false
@@ -61,63 +68,79 @@ onMounted(refresh)
 </script>
 
 <template>
-  <div class="page">
-    <el-page-header @back="router.push({ name: 'events' })" content="Каналы" />
-    <p>Работающий watcher подхватит настройки на следующем цикле. По умолчанию проверка — через 30 минут после окончания предыдущего цикла; интервал задаётся при запуске.</p>
-    <el-card>
-      <template #header>Добавить канал</template>
-      <el-form label-position="top" @submit.prevent="add">
-        <el-form-item label="Публичная ссылка или @имя канала">
-          <el-input v-model="form.username" placeholder="https://t.me/channel" />
-        </el-form-item>
-        <el-form-item label="Сколько последних постов взять один раз при подключении">
-          <el-input-number v-model="form.initial_posts" :min="1" :max="1000" :precision="0" />
-        </el-form-item>
-        <el-button type="primary" :loading="saving" @click="add">Добавить</el-button>
-      </el-form>
-    </el-card>
-    <p>Затем собираются все новые посты. Приостановка сохраняет события и позицию сбора. Число постов можно изменить только до начала первой загрузки.</p>
-    <el-button :loading="loading" @click="refresh">Обновить состояние</el-button>
-    <p class="table-help">Прокрутите таблицу вправо, чтобы увидеть время проверок и ошибки.</p>
-    <el-table :data="items" v-loading="loading">
-      <el-table-column label="Канал" min-width="160">
-        <template #default="{ row }"><a :href="`https://t.me/${row.username}`" target="_blank" rel="noopener">@{{ row.username }}</a></template>
-      </el-table-column>
-      <el-table-column label="Сбор" min-width="220">
-        <template #default="{ row }">
-          <div>{{ row.enabled ? 'Включён' : 'Приостановлен' }}</div>
-          <div>{{ INITIAL_STATUSES[row.initial_status] }}</div>
-          <el-button :disabled="saving" @click="update(row, { enabled: !row.enabled })">{{ row.enabled ? 'Приостановить' : 'Возобновить' }}</el-button>
-        </template>
-      </el-table-column>
-      <el-table-column label="Первая загрузка" min-width="200">
-        <template #default="{ row }">
-          <template v-if="row.initial_status === 'pending'">
-            <el-input-number v-model="row.initial_posts" :min="1" :max="1000" :precision="0" />
-            <el-button text :disabled="saving" @click="update(row, { initial_posts: row.initial_posts })">Сохранить число</el-button>
-          </template>
-          <span v-else>{{ row.mode === 'legacy' ? 'Сохранён прежний прогресс' : `${row.initial_posts} последних постов` }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="Последняя попытка" min-width="180">
-        <template #default="{ row }">{{ timestamp(row.last_attempt_at) }}</template>
-      </el-table-column>
-      <el-table-column label="Проверка Telegram успешна" min-width="180">
-        <template #default="{ row }">{{ timestamp(row.last_success_at) }}</template>
-      </el-table-column>
-      <el-table-column prop="last_error" label="Ошибка" min-width="220" />
-    </el-table>
-    <p v-if="!loading && !items.length">Каналов пока нет. Добавьте первый.</p>
-    <p>Время проверок показано в часовом поясе устройства. Добавление не проверяет существование канала: доступность определится при следующем сборе.</p>
+  <div class="page stack">
+    <div>
+      <h1 class="page-title">Каналы</h1>
+      <p class="page-description">Источники публикаций для городской афиши.</p>
+    </div>
+    <va-card>
+      <va-card-title>Добавить канал</va-card-title>
+      <va-card-content>
+        <va-form class="channel-form" @submit.prevent="add">
+          <va-input v-model="form.username" label="Публичная ссылка или @имя канала" placeholder="https://t.me/channel" />
+          <va-counter v-model="form.initial_posts" :min="1" :max="1000" :step="1"
+            label="Постов при подключении" />
+          <va-button type="submit" :loading="saving" :disabled="!form.username.trim()">Добавить канал</va-button>
+        </va-form>
+        <p class="form-help muted">Последние посты загружаются один раз, затем собираются все новые. Глубину загрузки можно изменить до её начала.</p>
+      </va-card-content>
+    </va-card>
+
+    <va-alert color="info" outline>
+      Новые настройки применятся при следующей проверке. Обычно проверка начинается через 30 минут после окончания предыдущей.
+      Приостановка сохраняет события и позицию сбора.
+    </va-alert>
+
+    <va-card>
+      <va-card-content>
+        <div class="toolbar">
+          <h2 class="section-title">Подключённые каналы</h2>
+          <va-button preset="secondary" icon="refresh" :loading="loading" @click="refresh">Обновить состояние</va-button>
+        </div>
+        <div class="table-wrapper">
+          <va-data-table :items="items" :columns="columns" :loading="loading" items-track-by="username"
+            no-data-html="Каналов пока нет. Добавьте первый.">
+            <template #cell(username)="{ value }">
+              <a :href="`https://t.me/${value}`" target="_blank" rel="noopener">@{{ value }}</a>
+            </template>
+            <template #cell(enabled)="{ rowData }">
+              <div class="channel-status">
+                <va-chip :color="rowData.enabled ? 'success' : 'secondary'" size="small">
+                  {{ rowData.enabled ? 'Включён' : 'Приостановлен' }}
+                </va-chip>
+                <span class="muted">{{ INITIAL_STATUSES[rowData.initial_status] }}</span>
+                <va-button preset="secondary" size="small" :disabled="saving"
+                  @click="update(rowData, { enabled: !rowData.enabled })">
+                  {{ rowData.enabled ? 'Приостановить' : 'Возобновить' }}
+                </va-button>
+              </div>
+            </template>
+            <template #cell(initial_posts)="{ rowData }">
+              <div v-if="rowData.initial_status === 'pending'" class="channel-status">
+                <va-counter v-model="rowData.initial_posts" :min="1" :max="1000" :step="1" aria-label="Постов при подключении" />
+                <va-button preset="plain" :disabled="saving" @click="update(rowData, { initial_posts: rowData.initial_posts })">
+                  Сохранить число
+                </va-button>
+              </div>
+              <span v-else>{{ rowData.mode === 'legacy' ? 'Сохранён прежний прогресс' : `${rowData.initial_posts} последних постов` }}</span>
+            </template>
+            <template #cell(last_attempt_at)="{ value }">{{ timestamp(value) }}</template>
+            <template #cell(last_success_at)="{ value }">{{ timestamp(value) }}</template>
+            <template #cell(last_error)="{ value }"><span class="channel-error">{{ value || '—' }}</span></template>
+          </va-data-table>
+        </div>
+        <p class="form-help muted">Время показано в часовом поясе устройства. Доступность нового канала определяется при следующем сборе.</p>
+      </va-card-content>
+    </va-card>
   </div>
 </template>
 
 <style scoped>
-.page { padding: 20px 32px; }
-.el-card { max-width: 640px; margin-top: 20px; }
-.table-help { display: none; }
-@media (max-width: 600px) {
-  .page { padding: 16px 12px; }
-  .table-help { display: block; }
-}
+.channel-form { display: grid; grid-template-columns: minmax(240px, 1fr) 240px auto; gap: 20px; align-items: end; }
+.form-help { margin-top: 16px; line-height: 1.5; }
+.section-title { font-size: 20px; font-weight: 600; }
+.channel-status { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; white-space: normal; }
+.channel-status .va-counter { width: 180px; }
+.channel-error { white-space: normal; overflow-wrap: anywhere; }
+@media (max-width: 1100px) { .channel-form { grid-template-columns: minmax(0, 1fr); } }
 </style>

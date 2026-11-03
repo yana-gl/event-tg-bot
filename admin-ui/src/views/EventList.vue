@@ -1,94 +1,84 @@
 <script setup>
 import { onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { useToast } from 'vuestic-ui'
 import { useEventsStore, STATUSES, EVENT_STATES } from '../stores/events'
-import { useAuthStore } from '../stores/auth'
-import { ElMessage } from 'element-plus'
 
 const store = useEventsStore()
-const auth = useAuthStore()
 const router = useRouter()
-
-function categoryLabel(value) {
-  if (!value) return ''
-  return value
-}
+const { init: notify } = useToast()
+const statusColors = { published: 'success', draft: 'warning', rejected: 'danger', repeat: 'secondary', not_event: 'secondary' }
+const columns = [
+  { key: 'id', label: 'ID', width: '70px' },
+  { key: 'title', label: 'Событие', width: '260px' },
+  { key: 'when', label: 'Когда', width: '170px' },
+  { key: 'place', label: 'Место', width: '180px' },
+  { key: 'category', label: 'Категория' },
+  { key: 'status', label: 'Статус' },
+  { key: 'event_state', label: 'Состояние', width: '180px' },
+  { key: 'conflict_post_id', label: 'Проверка' }
+]
 
 function when(row) {
-  const parts = []
-  if (row.date) parts.push(row.date)
-  if (row.time) parts.push(row.time)
-  return parts.join(', ')
+  return [row.date, row.time].filter(Boolean).join(', ') || '—'
 }
 
-async function selectStatus(value) {
+function openRow({ event, item }) {
+  if (!event.target.closest('a')) router.push({ name: 'event-detail', params: { id: item.id } })
+}
+
+async function refresh(status) {
   try {
-    await store.fetchList(value)
+    await store.fetchList(status)
   } catch (e) {
-    ElMessage.error(e.message)
+    notify({ message: e.message, color: 'danger' })
   }
 }
 
-function open(row) {
-  router.push({ name: 'event-detail', params: { id: row.id } })
-}
-
-function logout() {
-  auth.logout()
-  router.replace({ name: 'login' })
-}
-
-onMounted(() => {
-  store.fetchList().catch((e) => ElMessage.error(e.message))
-})
+onMounted(() => refresh())
 </script>
 
 <template>
   <div class="page">
-    <header class="topbar">
-      <span class="title">События</span>
-      <div class="right">
-        <el-button @click="router.push({ name: 'channels' })">Каналы</el-button>
-        <el-tag v-if="auth.user" type="info">{{ auth.user }}</el-tag>
-        <el-button text @click="logout">Выйти</el-button>
-      </div>
-    </header>
-
-    <div class="filters">
-      <el-select :model-value="store.status" style="width:220px" @change="selectStatus">
-        <el-option v-for="s in STATUSES" :key="s.value" :label="s.label" :value="s.value" />
-      </el-select>
-    </div>
-
-    <el-table v-loading="store.loading" :data="store.items" @row-click="open" highlight-current-row>
-      <el-table-column prop="id" label="ID" width="80" />
-      <el-table-column prop="title" label="Название" min-width="240" />
-      <el-table-column label="Когда" width="180">
-        <template #default="{ row }">{{ when(row) || '—' }}</template>
-      </el-table-column>
-      <el-table-column prop="place" label="Место" min-width="160" />
-      <el-table-column label="Категория" width="120">
-        <template #default="{ row }">{{ categoryLabel(row.category) || '—' }}</template>
-      </el-table-column>
-      <el-table-column label="Статус" width="120">
-        <template #default="{ row }"><el-tag>{{ row.status }}</el-tag></template>
-      </el-table-column>
-      <el-table-column label="Состояние" min-width="180">
-        <template #default="{ row }">{{ EVENT_STATES[row.event_state] || row.event_state }}</template>
-      </el-table-column>
-      <el-table-column label="Проверка" width="160">
-        <template #default="{ row }"><el-tag v-if="row.conflict_post_id" type="warning">Спорное изменение</el-tag></template>
-      </el-table-column>
-    </el-table>
-    <div v-if="!store.loading && !store.items.length" class="empty">Нет событий в этом статусе.</div>
+    <h1 class="page-title">События</h1>
+    <p class="page-description">Проверяйте спорные изменения и редактируйте карточки городской афиши.</p>
+    <va-card>
+      <va-card-content>
+        <div class="toolbar">
+          <va-select :model-value="store.status" :options="STATUSES" text-by="label" value-by="value"
+            label="Показать" class="status-filter" @update:model-value="refresh" />
+          <va-button preset="secondary" icon="refresh" :loading="store.loading" @click="refresh()">Обновить</va-button>
+        </div>
+        <div class="table-wrapper">
+          <va-data-table :items="store.items" :columns="columns" :loading="store.loading"
+            hoverable clickable no-data-html="Нет событий в этом статусе." items-track-by="id" @row:click="openRow">
+            <template #cell(title)="{ rowData }">
+              <router-link :to="{ name: 'event-detail', params: { id: rowData.id } }" class="event-link">
+                {{ rowData.title || 'Без названия' }}
+              </router-link>
+            </template>
+            <template #cell(when)="{ rowData }">{{ when(rowData) }}</template>
+            <template #cell(place)="{ value }">{{ value || '—' }}</template>
+            <template #cell(category)="{ value }">{{ value || '—' }}</template>
+            <template #cell(status)="{ value }">
+              <va-chip :color="statusColors[value] || 'secondary'" size="small">
+                {{ STATUSES.find(s => s.value === value)?.label || value }}
+              </va-chip>
+            </template>
+            <template #cell(event_state)="{ value }">{{ EVENT_STATES[value] || value }}</template>
+            <template #cell(conflict_post_id)="{ value }">
+              <va-chip v-if="value" color="warning" size="small">Спорное изменение</va-chip>
+              <span v-else class="muted">—</span>
+            </template>
+          </va-data-table>
+        </div>
+      </va-card-content>
+    </va-card>
   </div>
 </template>
 
 <style scoped>
-.page { padding: 20px 32px; }
-.topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-.title { font-size: 20px; font-weight: 600; }
-.filters { margin-bottom: 16px; }
-.empty { color: #909399; padding: 24px; text-align: center; }
-@media (max-width: 600px) { .page { padding: 16px 12px; } }
+.toolbar .status-filter { width: 260px; max-width: 100%; }
+.event-link { display: block; font-weight: 600; line-height: 1.5; white-space: normal; }
+@media (max-width: 640px) { .toolbar .status-filter { width: 100%; } }
 </style>
