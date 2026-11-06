@@ -37,7 +37,11 @@ function loadDetail(d) {
   for (const k of ['title', 'date', 'end_date', 'time', 'end_time', 'place', 'address', 'price', 'status', 'event_state']) {
     form[k] = d[k] ?? ''
   }
-  form.category = d.category ?? ''
+  form.category = d.category ?? null
+}
+
+function editedFields() {
+  return { ...form, category: form.category || null }
 }
 
 watchEffect(() => {
@@ -46,7 +50,7 @@ watchEffect(() => {
 
 async function save() {
   try {
-    await store.update(route.params.id, { ...form })
+    await store.update(route.params.id, editedFields())
     notify({ message: 'Сохранено', color: 'success' })
     await store.fetchDetail(route.params.id)
   } catch (e) {
@@ -69,7 +73,7 @@ async function resolveConflict(useForm) {
   const detail = store.detail
   try {
     await store.update(route.params.id, {
-      ...(useForm ? form : {}),
+      ...(useForm ? editedFields() : {}),
       resolve_conflict: { post_id: detail.conflict_post_id, at: detail.conflict_at }
     })
     await store.fetchDetail(route.params.id)

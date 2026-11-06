@@ -1,13 +1,17 @@
 import sqlite3
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from tg_event.database import (
     fetch_event_detail,
     fetch_published_events,
     init_database,
+    merge_events,
     save_event_source,
     save_parsed_row,
+    update_event,
 )
 
 
@@ -166,6 +170,101 @@ class DatabaseTest(unittest.TestCase):
             with self.subTest(ids=ids):
                 with self.assertRaises(sqlite3.IntegrityError), self.connection:
                     save_event_source(self.connection, *ids, row["events"][0])
+
+
+class DatabaseConcurrencyTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "events.sqlite3"
+        self.connection = sqlite3.connect(path, timeout=0)
+        self.other = sqlite3.connect(path, timeout=0)
+        for connection in (self.connection, self.other):
+            self.addCleanup(connection.close)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+        init_database(self.connection)
+        row = parsed_row()
+        row["events"] = row["events"][:1]
+        save_parsed_row(self.connection, row)
+        row["message_id"] += 1
+        row["events"][0]["title"] = "Another title"
+        save_parsed_row(self.connection, row)
+
+    def competing_write(self, prefix, statement, values):
+        outcomes = []
+
+        def trace(sql):
+            if outcomes or not sql.lstrip().startswith(prefix):
+                return
+            try:
+                with self.other:
+                    self.other.execute(statement, values)
+            except sqlite3.OperationalError as error:
+                outcomes.append(str(error))
+            else:
+                outcomes.append("committed")
+
+        self.connection.set_trace_callback(trace)
+        self.addCleanup(self.connection.set_trace_callback, None)
+        return outcomes
+
+    def test_update_locks_current_conflict_and_fields_before_reading(self):
+        stamp = "2026-07-02T10:00:00+00:00"
+        newer = "2026-07-03T10:00:00+00:00"
+        with self.connection:
+            self.connection.execute("UPDATE events SET conflict_post_id=2, conflict_at=? WHERE id=1", (stamp,))
+        outcomes = self.competing_write(
+            "UPDATE events SET price",
+            "UPDATE events SET price='500', conflict_at=? WHERE id=1", (newer,),
+        )
+
+        self.assertTrue(update_event(self.connection, 1, {"price": None},
+                                     resolve_conflict={"post_id": 2, "at": stamp}))
+
+        self.assertEqual(outcomes, ["database is locked"])
+        self.assertIsNone(fetch_event_detail(self.connection, 1)["conflict_at"])
+        self.assertEqual(self.connection.execute("SELECT field FROM event_field_locks").fetchall(), [])
+        self.assertFalse(self.connection.in_transaction)
+        with self.other:
+            self.other.execute("UPDATE events SET price='500', conflict_post_id=2, conflict_at=? WHERE id=1", (newer,))
+        with self.assertRaises(ValueError):
+            update_event(self.connection, 1, {}, resolve_conflict={"post_id": 2, "at": stamp})
+        self.assertFalse(self.connection.in_transaction)
+        update_event(self.connection, 1, {"price": None})
+        self.assertEqual([r[0] for r in self.connection.execute("SELECT field FROM event_field_locks")], ["price"])
+
+    def test_merge_locks_both_cards_before_reading_fields_and_conflicts(self):
+        outcomes = self.competing_write(
+            "INSERT INTO event_sources",
+            "UPDATE events SET price='500', conflict_post_id=2, conflict_at=? WHERE id=2",
+            ("2026-07-03T10:00:00+00:00",),
+        )
+
+        self.assertTrue(merge_events(self.connection, 2, 1))
+
+        self.assertEqual(outcomes, ["database is locked"])
+        self.assertIsNone(fetch_event_detail(self.connection, 2))
+        detail = fetch_event_detail(self.connection, 1)
+        self.assertEqual(len(detail["sources"]), 2)
+        self.assertIsNone(detail["price"])
+        self.assertIsNone(detail["conflict_at"])
+        self.assertEqual([r[0] for r in self.connection.execute("SELECT field FROM event_field_locks")], ["title"])
+        self.assertFalse(self.connection.in_transaction)
+        with self.other:
+            self.other.execute("UPDATE events SET price='700' WHERE id=1")
+        self.assertEqual(fetch_event_detail(self.connection, 1)["price"], "700")
+
+    def test_existing_write_transaction_remains_atomic(self):
+        for operation, prefix in ((lambda: update_event(self.connection, 1, {"price": "100"}),
+                                   "UPDATE events SET price"),
+                                  (lambda: merge_events(self.connection, 2, 1), "INSERT INTO event_sources")):
+            with self.subTest(statement=prefix):
+                outcomes = self.competing_write(prefix, "UPDATE events SET price='500' WHERE id=1", ())
+                self.connection.execute("UPDATE sources SET city='Владивосток'")
+                self.assertTrue(operation())
+                self.assertEqual(outcomes, ["database is locked"])
+                self.assertFalse(self.connection.in_transaction)
 
 
 def parsed_row():

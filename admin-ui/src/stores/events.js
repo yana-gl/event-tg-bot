@@ -22,19 +22,23 @@ export const useEventsStore = defineStore('events', {
     status: 'exceptions',
     items: [],
     loading: false,
+    listRequestId: 0,
     detail: null,
     detailLoading: false,
     saving: false
   }),
   actions: {
     async fetchList(status) {
+      const requestId = ++this.listRequestId
       if (status) this.status = status
       this.loading = true
       try {
         const data = await apiGet(`/api/events?status=${encodeURIComponent(this.status)}`)
-        this.items = data.items || []
+        if (requestId === this.listRequestId) this.items = data.items || []
+      } catch (error) {
+        if (requestId === this.listRequestId) throw error
       } finally {
-        this.loading = false
+        if (requestId === this.listRequestId) this.loading = false
       }
     },
     async fetchDetail(id) {

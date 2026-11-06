@@ -1,111 +1,85 @@
+from __future__ import annotations
+
+import io
+import sqlite3
+import tempfile
 import unittest
-from threading import Barrier, Lock
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
-from tg_event.cli import extract_links, parse_rows
-
-
-class FakeEvent:
-    def __init__(self, title):
-        self.title = title
-
-    def to_dict(self):
-        return {"title": self.title, "status": "draft"}
+from tg_event.cli import _serve, main
+from tg_event.database import connect_database
 
 
 class CliTest(unittest.TestCase):
-    def test_parallel_parsing_is_bounded_ordered_and_keeps_successes(self):
-        rows = [dict(source="test", message_id=i, published_at="2026-11-05", text=str(i),
-                     url=f"https://t.me/test/{i}", city="Владивосток") for i in range(1, 7)]
-        settings = SimpleNamespace(openrouter_api_key="test", openrouter_model="test", openrouter_fallback_model="test")
-        barrier = Barrier(3, timeout=3)
-        lock = Lock()
-        active = peak = 0
+    def setUp(self):
+        self.settings = SimpleNamespace(admin_host="127.0.0.1", admin_port=8080)
+        settings = patch("tg_event.cli.Settings.from_env", return_value=self.settings)
+        self.read_settings = settings.start()
+        self.addCleanup(settings.stop)
 
-        def parse_one(**kwargs):
-            nonlocal active, peak
-            with lock:
-                active += 1
-                peak = max(active, peak)
-            try:
-                barrier.wait()
-                if kwargs["text"] == "2":
-                    raise ValueError("invalid response")
-                return [FakeEvent(kwargs["text"])]
-            finally:
-                with lock:
-                    active -= 1
+    def run_command(self, *arguments):
+        with patch("sys.argv", ["tg-event", *arguments]), patch("sys.stdout", new_callable=io.StringIO) as output:
+            main()
+            return output.getvalue()
 
-        parsed = parse_rows(rows, settings, parse_one=parse_one, continue_on_error=True,
-                            progress=lambda message: None, max_workers=3)
-        self.assertEqual(peak, 3)
-        self.assertEqual([row["message_id"] for row in parsed], [1, 3, 4, 5, 6])
+    def test_collect_prints_the_export_path(self):
+        with patch("tg_event.cli.collect_to_file", AsyncMock(return_value=Path("raw.jsonl"))) as collect:
+            self.assertEqual(self.run_command("collect"), "raw.jsonl\n")
+        collect.assert_awaited_once_with(self.settings)
 
-    def test_parse_rows_respects_limit(self):
-        rows = [
-            {
-                "source": "events_vrn",
-                "message_id": index,
-                "published_at": "2026-07-04T10:00:00+03:00",
-                "url": f"https://t.me/events_vrn/{index}",
-                "text": f"post {index}",
-                "links": [],
-                "city": "Воронеж",
-            }
-            for index in range(1, 4)
-        ]
-        settings = SimpleNamespace(
-            openrouter_api_key="key",
-            openrouter_model="model",
-            openrouter_fallback_model="fallback",
-        )
+    def test_parse_and_run_keep_input_and_limit(self):
+        for arguments in (("parse", "--input", "raw.jsonl", "--limit", "2"), ("run", "--limit", "2")):
+            with self.subTest(command=arguments[0]), patch(
+                "tg_event.cli.collect_to_file", AsyncMock(return_value=Path("raw.jsonl")),
+            ) as collect, patch("tg_event.cli.parse_file", return_value=Path("parsed.jsonl")) as parse:
+                self.assertEqual(self.run_command(*arguments), "parsed.jsonl\n")
+                parse.assert_called_once_with(self.settings, Path("raw.jsonl"), limit=2)
+                self.assertEqual(collect.await_count, int(arguments[0] == "run"))
 
-        parsed = parse_rows(
-            rows,
-            settings,
-            limit=2,
-            parse_one=lambda **kwargs: [FakeEvent(kwargs["text"])],
-            progress=lambda message: None,
-        )
+    def test_parse_requires_input(self):
+        with self.assertRaisesRegex(SystemExit, "--input is required"):
+            self.run_command("parse")
 
-        self.assertEqual(len(parsed), 2)
-        self.assertEqual(parsed[0]["post_url"], "https://t.me/events_vrn/1")
-        self.assertEqual(parsed[0]["events"][0]["title"], "post 1")
-        self.assertEqual(parsed[1]["events"][0]["title"], "post 2")
+    def test_watch_passes_the_existing_options(self):
+        with patch("tg_event.cli.run_watch", AsyncMock()) as watch:
+            self.run_command("watch", "--once", "--interval", "60", "--since", "2026-11-01",
+                             "--state", "custom.json", "--max-posts-per-cycle", "7",
+                             "--max-posts-per-channel", "3")
+        watch.assert_awaited_once_with(self.settings, interval=60, once=True, since_date="2026-11-01",
+                                       state_path=Path("custom.json"), max_posts_per_cycle=7,
+                                       max_posts_per_channel=3)
 
-    def test_parse_rows_writes_multiple_events_for_one_post(self):
-        rows = [
-            {
-                "source": "events_vrn",
-                "message_id": 10,
-                "published_at": "2026-07-04T10:00:00+03:00",
-                "url": "https://t.me/events_vrn/10",
-                "text": "two events https://example.com/info",
-                "city": "Воронеж",
-            }
-        ]
-        settings = SimpleNamespace(
-            openrouter_api_key="key",
-            openrouter_model="model",
-            openrouter_fallback_model="fallback",
-        )
+    def test_serve_keeps_defaults_and_overrides(self):
+        for arguments, expected in (
+            (("serve",), dict(host="127.0.0.1", port=8080, dev=False)),
+            (("serve", "--host", "localhost", "--port", "9090", "--dev"),
+             dict(host="localhost", port=9090, dev=True)),
+        ):
+            with self.subTest(arguments=arguments), patch("tg_event.cli._serve") as serve:
+                self.run_command(*arguments)
+                serve.assert_called_once_with(self.settings, **expected)
 
-        parsed = parse_rows(
-            rows,
-            settings,
-            parse_one=lambda **kwargs: [FakeEvent("Лекция"), FakeEvent("Концерт")],
-            progress=lambda message: None,
-        )
+    def test_help_does_not_load_credentials(self):
+        with self.assertRaises(SystemExit) as stopped:
+            self.run_command("--help")
+        self.assertEqual(stopped.exception.code, 0)
+        self.read_settings.assert_not_called()
 
-        self.assertEqual(len(parsed), 1)
-        self.assertEqual(parsed[0]["links"], ["https://example.com/info"])
-        self.assertEqual([event["title"] for event in parsed[0]["events"]], ["Лекция", "Концерт"])
+    def test_admin_startup_closes_setup_connection_before_serving(self):
+        with tempfile.TemporaryDirectory() as folder:
+            settings = SimpleNamespace(database_path=Path(folder) / "db.sqlite3", admin_user="admin",
+                                       admin_password="fake", admin_secret="fake", admin_static_dir=Path(folder))
+            setup_connection = connect_database(settings.database_path)
+            self.addCleanup(setup_connection.close)
 
-    def test_extract_links_finds_urls_and_mentions(self):
-        text = "Подробности: https://example.com/a и @events_vrn"
+            def serve(config, **options):
+                self.assertIs(config, settings)
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    setup_connection.execute("SELECT 1")
 
-        self.assertEqual(extract_links(text), ["https://example.com/a", "https://t.me/events_vrn"])
-
-
-if __name__ == "__main__":
-    unittest.main()
+            with patch("tg_event.cli.connect_database", return_value=setup_connection), \
+                    patch("tg_event.admin.serve", side_effect=serve) as server:
+                _serve(settings, "127.0.0.1", 8080, True)
+            server.assert_called_once()

@@ -66,7 +66,7 @@ class StaticSecurityTest(unittest.TestCase):
 class AdminConfigurationSecurityTest(unittest.TestCase):
     def test_server_requires_secret_before_opening_database(self):
         for secret in ("", "   "):
-            with self.subTest(secret=secret), patch("tg_event.database.connect_database") as connect:
+            with self.subTest(secret=secret), patch("tg_event.cli.connect_database") as connect:
                 settings = default_settings(admin_user="admin", admin_password="test", admin_secret=secret)
                 with self.assertRaisesRegex(SystemExit, "ADMIN_SECRET"):
                     _serve(settings, "127.0.0.1", 8080, False)

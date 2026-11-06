@@ -11,7 +11,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from test_deduplication import post
-from tg_event.cli import _watch_loop, parse_rows
+from tg_event.watcher import watch_loop
+from tg_event.pipeline import parse_rows
 from tg_event.database import connect_database, init_database, save_event_source, save_parsed_row, update_event
 from tg_event.event_schema import validate_event
 
@@ -63,11 +64,11 @@ class WatchRecoveryTest(unittest.IsolatedAsyncioTestCase):
         self.fail_posts = set()
         self.attempts = []
         self.add_patch(patch.dict("sys.modules", {"telethon": SimpleNamespace(TelegramClient=lambda *a: self.client)}))
-        self.add_patch(patch("tg_event.cli.parse_rows", side_effect=self.parse))
-        self.add_patch(patch("tg_event.cli.find_repeats", side_effect=lambda **kw: [None] * len(kw["new_events"])))
+        self.add_patch(patch("tg_event.watcher.parse_rows", side_effect=self.parse))
+        self.add_patch(patch("tg_event.pipeline.find_repeats", side_effect=lambda **kw: [None] * len(kw["new_events"])))
         self.add_patch(patch("builtins.print"))
-        self.add_patch(patch("tg_event.cli.run_cleanup", return_value={"skipped": True}))
-        self.add_patch(patch("tg_event.cli.today_in_city", return_value=date(2026, 7, 1)))
+        self.add_patch(patch("tg_event.watcher.run_cleanup", return_value={"skipped": True}))
+        self.add_patch(patch("tg_event.pipeline.today_in_city", return_value=date(2026, 7, 1)))
         with connect_database(self.settings.database_path) as db:
             init_database(db)
             db.execute("INSERT INTO channel_settings (username,mode) VALUES ('events_vrn','legacy')")
@@ -95,7 +96,7 @@ class WatchRecoveryTest(unittest.IsolatedAsyncioTestCase):
         ) for i in range(1, count + 1)]
 
     async def run_cycle(self, *, quota=10, since="2026-07-01"):
-        await _watch_loop(self.settings, interval=1, once=True, since_date=since, state_path=self.state_path,
+        await watch_loop(self.settings, interval=1, once=True, since_date=since, state_path=self.state_path,
                           max_posts_per_cycle=None, max_posts_per_channel=quota)
 
     def cursor(self, channel="events_vrn"):
@@ -166,7 +167,7 @@ class WatchRecoveryTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_json_failure_and_restart_use_sqlite_without_reparsing(self):
         self.feed(2)
-        with patch("tg_event.cli.save_state", side_effect=OSError("export failure")), self.assertRaises(OSError):
+        with patch("tg_event.watcher.save_state", side_effect=OSError("export failure")), self.assertRaises(OSError):
             await self.run_cycle()
         self.assertEqual(self.cursor(), 2)
         self.state_path.write_text("{")
@@ -230,10 +231,10 @@ class WatchRecoveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.counts(), (4, 4))
 
     async def test_continuous_watch_survives_failed_cycle(self):
-        with patch("tg_event.cli._watch_cycle", AsyncMock(side_effect=[OSError("offline"), False])) as cycle, patch(
-            "tg_event.cli.asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError()]),
+        with patch("tg_event.watcher.watch_cycle", AsyncMock(side_effect=[OSError("offline"), False])) as cycle, patch(
+            "tg_event.watcher.asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError()]),
         ):
             with self.assertRaises(asyncio.CancelledError):
-                await _watch_loop(self.settings, interval=1, once=False, since_date="2026-07-01",
+                await watch_loop(self.settings, interval=1, once=False, since_date="2026-07-01",
                                   state_path=self.state_path, max_posts_per_cycle=None, max_posts_per_channel=10)
         self.assertEqual(cycle.await_count, 2)

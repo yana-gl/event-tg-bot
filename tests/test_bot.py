@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from tg_event.bot import MAX_MESSAGE_LEN, PERIODS, _split_messages, format_events, today_in_city
 from tg_event.database import fetch_published_events, init_database, save_parsed_row
-from tg_event.cli import _mark_repeats
+from tg_event.pipeline import match_events
 from tg_event.event_schema import validate_event
 from test_database import parsed_row
 
@@ -222,8 +222,8 @@ class BotSourceTest(unittest.TestCase):
         row["events"] = [validate_event(payload).to_dict()]
         settings = SimpleNamespace(openrouter_api_key="test", openrouter_fallback_model="test")
 
-        with patch("tg_event.cli.find_repeats", return_value=[1]):
-            _mark_repeats(self.connection, settings, [row])
+        with patch("tg_event.pipeline.find_repeats", return_value=[1]):
+            match_events(self.connection, settings, [row])
         save_parsed_row(self.connection, row)
 
         self.assertEqual(row["events"][0]["_match_id"], 1)

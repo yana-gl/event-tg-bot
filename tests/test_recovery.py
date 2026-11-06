@@ -9,13 +9,78 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from test_deduplication import post
-from tg_event.cli import parse_rows
-from tg_event.database import init_database, save_parsed_row, save_parsed_rows
+from tg_event.pipeline import parse_rows
+from tg_event.database import (
+    advance_watch_progress, init_database, init_watch_progress,
+    save_parsed_row, save_parsed_rows,
+)
 from tg_event.event_schema import validate_event
 from tg_event.watcher import save_state
 
 
 class RecoveryTest(unittest.TestCase):
+    def test_single_row_failure_rolls_back_post_links_and_events(self):
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        self.addCleanup(db.close)
+        init_database(db)
+        original = post(1)
+        save_parsed_row(db, original)
+        before = list(db.iterdump())
+        broken = post(1, title="Changed extraction")
+        broken["links"] = ["https://example.com/replaced"]
+        broken["events"].append(dict(broken["events"][0], title="Broken", confidence="invalid"))
+
+        with self.assertRaises(ValueError):
+            save_parsed_row(db, broken)
+
+        self.assertEqual(list(db.iterdump()), before)
+        self.assertFalse(db.in_transaction)
+
+    def test_progress_failure_rolls_back_data_links_primary_and_cursor(self):
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA foreign_keys = ON")
+        self.addCleanup(db.close)
+        init_database(db)
+        original = post(1)
+        save_parsed_row(db, original)
+        init_watch_progress(db, "profile", [original["source"], "organizer"], "2026-07-01", {})
+        tables = ("sources", "raw_posts", "post_links", "events", "event_sources",
+                  "event_field_locks", "event_conflict_resolutions", "watch_progress")
+
+        def snapshot():
+            return {table: [tuple(row) for row in db.execute(f"SELECT * FROM {table} ORDER BY rowid")]
+                    for table in tables}
+
+        before = snapshot()
+        changed = dict(original, links=["https://example.com/replaced"])
+        incoming = post(2, organizer="Club", price="500", _match_id=1)
+        incoming.update(source="organizer", post_url="https://t.me/organizer/2")
+        fresh = post(3, title="Another event")
+        rows = [changed, incoming, fresh]
+        fetched = [dict(row, text=row["raw_text"]) for row in rows]
+
+        def fail_after_progress(connection, state_key, fetched_rows):
+            state = advance_watch_progress(connection, state_key, fetched_rows)
+            self.assertEqual(state, {original["source"]: 3, "organizer": 2})
+            self.assertEqual(connection.execute(
+                "SELECT s.username,e.price FROM events e JOIN raw_posts p ON p.id=e.raw_post_id "
+                "JOIN sources s ON s.id=p.source_id WHERE e.id=1").fetchone()[:], ("organizer", "500"))
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0], 2)
+            self.assertEqual(connection.execute("SELECT url FROM post_links WHERE raw_post_id=1").fetchone()[0],
+                             "https://example.com/replaced")
+            raise sqlite3.OperationalError("late progress failure")
+
+        with patch("tg_event.database.advance_watch_progress", side_effect=fail_after_progress), \
+                self.assertRaisesRegex(sqlite3.OperationalError, "late progress failure"):
+            save_parsed_rows(db, rows, source_rules={"organizer": {"organizers": ["Club"]}},
+                             watch_state_key="profile", fetched_rows=fetched)
+
+        self.assertEqual(snapshot(), before)
+        self.assertFalse(db.in_transaction)
+        self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+
     def test_failed_batch_rolls_back_all_new_posts_and_events(self):
         db = sqlite3.connect(":memory:")
         db.row_factory = sqlite3.Row

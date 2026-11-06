@@ -3,11 +3,7 @@ import sqlite3
 import unittest
 from pathlib import Path
 
-from tg_event.admin import (
-    _path_id,
-    _validate_fields,
-    make_handler,
-)
+from tg_event.admin import make_handler
 from tg_event.auth import issue_token, verify_token
 from tg_event.config import Settings
 from tg_event.database import (
@@ -135,31 +131,6 @@ class DatabaseAdminTest(unittest.TestCase):
 
     def test_delete_event_missing_returns_false(self):
         self.assertFalse(delete_event(self.connection, 999999))
-
-
-class AdminHelpersTest(unittest.TestCase):
-    def test_path_id_parses_int(self):
-        self.assertEqual(_path_id("/api/events/42"), 42)
-
-    def test_path_id_with_suffix(self):
-        self.assertEqual(_path_id("/api/events/42/delete", suffix="/delete"), 42)
-
-    def test_path_id_invalid(self):
-        self.assertIsNone(_path_id("/api/events/abc"))
-
-    def test_path_id_missing_suffix(self):
-        self.assertIsNone(_path_id("/api/events/42", suffix="/delete"))
-
-    def test_validate_fields_accepts_valid(self):
-        self.assertEqual(_validate_fields({"status": "published", "category": "music"}), [])
-
-    def test_validate_fields_rejects_bad_status(self):
-        errors = _validate_fields({"status": "repeat"})
-        self.assertTrue(any("status" in e for e in errors))
-
-    def test_validate_fields_rejects_bad_category(self):
-        errors = _validate_fields({"category": "noise"})
-        self.assertTrue(errors)
 
 
 class AdminApiTest(unittest.TestCase):
@@ -297,16 +268,6 @@ class AdminApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         conf = self.connection.execute("SELECT confidence FROM events WHERE id=?", (event_id,)).fetchone()[0]
         self.assertEqual(conf, original_conf)
-
-
-class ServeRequiresCredentialsTest(unittest.TestCase):
-    def test_settings_store_admin_fields(self):
-        s = default_settings(admin_user="u", admin_password="p", admin_secret="s")
-        self.assertEqual(s.admin_user, "u")
-        self.assertEqual(s.admin_password, "p")
-        self.assertEqual(s.admin_secret, "s")
-        self.assertEqual(s.admin_port, 8080)
-        self.assertEqual(str(s.admin_static_dir), "admin-ui/dist")
 
 
 if __name__ == "__main__":

@@ -60,8 +60,8 @@ def verify_token(token: str, secret: str) -> str | None:
         body_b64, signature_b64 = token.split(".", 1)
     except ValueError:
         return None
-    expected = hmac.new(_secret_key(secret), body_b64.encode("ascii"), hashlib.sha256).digest()
     try:
+        expected = hmac.new(_secret_key(secret), body_b64.encode("ascii"), hashlib.sha256).digest()
         signature = _b64url_decode(signature_b64)
     except (ValueError, base64.binascii.Error):
         return None

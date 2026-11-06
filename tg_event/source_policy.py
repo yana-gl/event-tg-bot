@@ -39,6 +39,8 @@ def source_score(
         role = 2
     elif place and place in {_normalized(a) for a in rule.get("venues", [])}:
         role = 1
+    if source["raw_post_id"] == (event.get("last_change_post_id") or event.get("raw_post_id")):
+        role = max(role, event.get("last_change_role", 0))
     completeness = sum(bool(extraction.get(k)) for k in
                        ("title", "date", "end_date", "time", "end_time", "place", "address", "price"))
     return role, completeness, source["published_at"], -source["raw_post_id"]

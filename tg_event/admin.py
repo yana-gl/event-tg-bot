@@ -3,39 +3,39 @@ from __future__ import annotations
 import hmac
 import json
 import mimetypes
+from contextlib import closing, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from sqlite3 import Connection
-from typing import Any
+from threading import RLock
+from typing import Any, Iterator
 from urllib.parse import unquote, urlparse
 
+from tg_event.admin_service import (
+    EDITABLE_STATUSES,
+    ValidationError,
+    merge_events,
+    update_event,
+)
 from tg_event.auth import LoginLimiter, issue_token, verify_token
 from tg_event.config import Settings
 from tg_event.channels import add_channel, list_channels, update_channel
 from tg_event.database import (
+    connect_database,
     fetch_event_detail,
     fetch_events_by_status,
-    update_event,
     delete_event,
-    merge_events,
 )
-from tg_event.event_schema import ALLOWED_CATEGORIES, EventStatus
+from tg_event.event_schema import EventStatus
 
 
-EDITABLE_STATUSES = {
-    EventStatus.DRAFT.value,
-    EventStatus.PUBLISHED.value,
-    EventStatus.REJECTED.value,
-    EventStatus.NOT_EVENT.value,
-}
 EVENT_LIST_STATUSES = EDITABLE_STATUSES | {EventStatus.REPEAT.value, "exceptions", "conflicts"}
-
-_IGNORE_FIELDS = {"is_event", "confidence", "reason", "raw_post_id"}
 
 
 class AdminHandler(BaseHTTPRequestHandler):
     settings: Settings
-    db: Connection
+    db: Connection | None
+    db_lock: RLock
     static_dir: Path
     login_limiter: LoginLimiter
 
@@ -80,34 +80,59 @@ class AdminHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "not found"}, status=404)
 
     def _read_body(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(length) if length else b""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise _ApiError(400, "invalid Content-Length")
+        if length < 0:
+            raise _ApiError(400, "invalid Content-Length")
+        try:
+            raw = self.rfile.read(length) if length else b""
+        except OverflowError:
+            raise _ApiError(400, "invalid Content-Length")
+        if len(raw) != length:
+            raise _ApiError(400, "incomplete body")
         if not raw:
             return {}
         try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
             raise _ApiError(400, "invalid json")
+        if not isinstance(payload, dict):
+            raise _ApiError(400, "expected JSON object")
+        return payload
+
+    @contextmanager
+    def _database(self) -> Iterator[Connection]:
+        if self.db is None:
+            with closing(connect_database(self.settings.database_path)) as connection:
+                yield connection
+        else:
+            with self.db_lock:
+                yield self.db
 
     def _handle_channels(self, update: bool = False) -> None:
         if self._require_auth() is None:
             self._send_json({"error": "unauthorized"}, status=401)
             return
         if not update:
-            self._send_json({"items": list_channels(self.db)})
+            with self._database() as connection:
+                items = list_channels(connection)
+            self._send_json({"items": items})
             return
         try:
             payload = self._read_body()
-            if not isinstance(payload, dict):
-                raise ValueError("Ожидается объект с настройками канала")
             path = urlparse(self.path).path
             if path == "/api/channels":
                 if set(payload) - {"username", "initial_posts"}:
                     raise ValueError("Укажите канал и число постов первой загрузки")
-                name = add_channel(self.db, payload.get("username"), payload.get("initial_posts", 20))
+                with self._database() as connection:
+                    name = add_channel(connection, payload.get("username"), payload.get("initial_posts", 20))
             else:
                 name = path.removeprefix("/api/channels/")
-                if not update_channel(self.db, name, payload):
+                with self._database() as connection:
+                    ok = update_channel(connection, name, payload)
+                if not ok:
                     self._send_json({"error": "Канал не найден"}, status=404)
                     return
         except _ApiError as err:
@@ -169,7 +194,8 @@ class AdminHandler(BaseHTTPRequestHandler):
         if status not in EVENT_LIST_STATUSES:
             self._send_json({"error": "invalid status"}, status=400)
             return
-        rows = fetch_events_by_status(self.db, status)
+        with self._database() as connection:
+            rows = fetch_events_by_status(connection, status)
         self._send_json({"items": rows, "status": status})
 
     def _handle_detail(self, path: str) -> None:
@@ -180,7 +206,8 @@ class AdminHandler(BaseHTTPRequestHandler):
         if event_id is None:
             self._send_json({"error": "invalid id"}, status=404)
             return
-        detail = fetch_event_detail(self.db, event_id)
+        with self._database() as connection:
+            detail = fetch_event_detail(connection, event_id)
         if detail is None:
             self._send_json({"error": "not found"}, status=404)
             return
@@ -196,26 +223,14 @@ class AdminHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = self._read_body()
+            with self._database() as connection:
+                ok = update_event(connection, event_id, payload)
         except _ApiError as err:
             self._send_json({"error": err.message}, status=err.status)
             return
-        clean = {k: v for k, v in payload.items() if k not in _IGNORE_FIELDS}
-        resolution = clean.pop("resolve_conflict", None)
-        if resolution is not None and not isinstance(resolution, dict):
-            self._send_json({"error": "invalid conflict resolution"}, status=400)
+        except ValidationError as err:
+            self._send_json({"error": str(err), "details": err.details}, status=400)
             return
-        for empty_key in ("title", "place", "address", "price"):
-            if clean.get(empty_key) == "":
-                clean[empty_key] = None
-        for empty_key in ("date", "end_date", "time", "end_time"):
-            if clean.get(empty_key) == "":
-                clean[empty_key] = None
-        errors = _validate_fields(clean)
-        if errors:
-            self._send_json({"error": "validation", "details": errors}, status=400)
-            return
-        try:
-            ok = update_event(self.db, event_id, clean, resolve_conflict=resolution)
         except ValueError as err:
             self._send_json({"error": str(err)}, status=400)
             return
@@ -233,17 +248,16 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "invalid id"}, status=404)
             return
         try:
-            target_id = self._read_body().get("target_id")
-            if type(target_id) is not int or target_id <= 0:
-                raise ValueError("target_id must be a positive integer")
-            ok = merge_events(self.db, event_id, target_id)
+            payload = self._read_body()
+            with self._database() as connection:
+                target_id = merge_events(connection, event_id, payload)
         except _ApiError as err:
             self._send_json({"error": err.message}, status=err.status)
             return
         except ValueError as err:
             self._send_json({"error": str(err)}, status=400)
             return
-        if not ok:
+        if target_id is None:
             self._send_json({"error": "not found"}, status=404)
             return
         self._send_json({"ok": True, "target_id": target_id})
@@ -256,7 +270,8 @@ class AdminHandler(BaseHTTPRequestHandler):
         if event_id is None:
             self._send_json({"error": "invalid id"}, status=404)
             return
-        ok = delete_event(self.db, event_id)
+        with self._database() as connection:
+            ok = delete_event(connection, event_id)
         if not ok:
             self._send_json({"error": "not found"}, status=404)
             return
@@ -324,9 +339,10 @@ def _path_id(path: str, suffix: str = "") -> int | None:
             return None
         rest = rest[: -len(suffix)]
     try:
-        return int(rest)
+        event_id = int(rest)
     except ValueError:
         return None
+    return event_id if -(2 ** 63) <= event_id <= 2 ** 63 - 1 else None
 
 
 def _query_value(query: str, key: str) -> str | None:
@@ -336,34 +352,19 @@ def _query_value(query: str, key: str) -> str | None:
     return values[0] if values else None
 
 
-def _validate_fields(fields: dict[str, Any]) -> list[str]:
-    errors: list[str] = []
-    if "event_state" in fields and fields["event_state"] not in {"scheduled", "postponed", "cancelled"}:
-        errors.append("event_state must be scheduled, postponed or cancelled")
-    if "status" in fields and fields["status"] not in EDITABLE_STATUSES:
-        errors.append("status must be one of: draft, published, rejected, not_event")
-    if "category" in fields:
-        category = fields["category"]
-        if category is not None and category not in ALLOWED_CATEGORIES:
-            errors.append("category must be one of: " + ", ".join(sorted(ALLOWED_CATEGORIES)))
-    for key in ("title", "place", "address", "price", "date", "end_date", "time", "end_time"):
-        if key in fields and fields[key] is not None and not isinstance(fields[key], str):
-            errors.append(f"{key} must be a string or null")
-    return errors
-
-
-def make_handler(settings: Settings, connection: Connection, static_dir: Path) -> type:
+def make_handler(settings: Settings, connection: Connection | None, static_dir: Path) -> type:
     class _Bound(AdminHandler):
         pass
 
     _Bound.settings = settings
     _Bound.login_limiter = LoginLimiter()
     _Bound.db = connection
+    _Bound.db_lock = RLock()
     _Bound.static_dir = static_dir
     return _Bound
 
 
-def serve(settings: Settings, connection: Connection, host: str, port: int, dev: bool) -> None:
+def serve(settings: Settings, host: str, port: int, dev: bool) -> None:
     static_dir = settings.admin_static_dir
     if dev:
         static_dir = Path(__file__).resolve().parent / "_dev_fallback"
@@ -372,7 +373,7 @@ def serve(settings: Settings, connection: Connection, host: str, port: int, dev:
             "Admin API is running in --dev mode. Open the Vite dev server (admin-ui).",
             encoding="utf-8",
         )
-    handler = make_handler(settings, connection, static_dir)
+    handler = make_handler(settings, None, static_dir)
     server = ThreadingHTTPServer((host, port), handler)
     print(f"Admin server on http://{host}:{port} (dev={dev})", flush=True)
     try:

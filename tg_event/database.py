@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -184,35 +183,40 @@ def init_database(connection: sqlite3.Connection) -> None:
 
 def save_parsed_row(
     connection: sqlite3.Connection, row: dict[str, Any],
-    *, _batch_ids: dict[int, int] | None = None,
-    source_rules: dict | None = None,
-    _created_ids: set[int] | None = None,
+    *, source_rules: dict | None = None,
 ) -> int:
-    with (connection if _batch_ids is None else nullcontext()):
-        source_id = _upsert_source(connection, row["source"], row.get("city") or "Воронеж")
-        previous_post = connection.execute(
-            "SELECT id, text, published_at, edited_at FROM raw_posts WHERE source_id = ? AND message_id = ?",
-            (source_id, int(row["message_id"])),
-        ).fetchone()
-        if previous_post is not None and change_timestamp(row) < change_timestamp(dict(previous_post)):
-            if _batch_ids is not None:
-                for event in row.get("events", []):
-                    matched = _match_saved_extraction(connection, previous_post["id"], event)
-                    if matched is None and isinstance(event.get("_match_id"), int):
-                        ref = event["_match_id"]
-                        matched = _batch_ids.get(ref) if ref < 0 else ref
-                    if matched is not None and "_batch_id" in event:
-                        _batch_ids[event["_batch_id"]] = matched
-            return previous_post["id"]
-        is_edit = bool(previous_post is not None and row.get("edited_at") and (
-            row["edited_at"] != previous_post["edited_at"]
-            or (row.get("raw_text") or row.get("text")) != previous_post["text"]
-        ))
-        raw_post_id = _upsert_raw_post(connection, source_id, row)
-        _replace_post_links(connection, raw_post_id, row.get("links", []))
-        _save_events(connection, raw_post_id, row.get("events", []),
-                     _batch_ids if _batch_ids is not None else {},
-                     source_rules or {}, is_edit=is_edit, created_ids=_created_ids)
+    with connection:
+        return _save_parsed_row(connection, row, None, source_rules or {})
+
+
+def _save_parsed_row(
+    connection: sqlite3.Connection, row: dict[str, Any],
+    batch_ids: dict[int, int] | None, source_rules: dict,
+    *, created_ids: set[int] | None = None,
+) -> int:
+    source_id = _upsert_source(connection, row["source"], row.get("city") or "Воронеж")
+    previous_post = connection.execute(
+        "SELECT id, text, published_at, edited_at FROM raw_posts WHERE source_id = ? AND message_id = ?",
+        (source_id, int(row["message_id"])),
+    ).fetchone()
+    if previous_post is not None and change_timestamp(row) < change_timestamp(dict(previous_post)):
+        if batch_ids is not None:
+            for event in row.get("events", []):
+                matched = _match_saved_extraction(connection, previous_post["id"], event)
+                if matched is None and isinstance(event.get("_match_id"), int):
+                    ref = event["_match_id"]
+                    matched = batch_ids.get(ref) if ref < 0 else ref
+                if matched is not None and "_batch_id" in event:
+                    batch_ids[event["_batch_id"]] = matched
+        return previous_post["id"]
+    is_edit = bool(previous_post is not None and row.get("edited_at") and (
+        row["edited_at"] != previous_post["edited_at"]
+        or (row.get("raw_text") or row.get("text")) != previous_post["text"]
+    ))
+    raw_post_id = _upsert_raw_post(connection, source_id, row)
+    _replace_post_links(connection, raw_post_id, row.get("links", []))
+    _save_events(connection, raw_post_id, row.get("events", []), batch_ids if batch_ids is not None else {},
+                 source_rules, is_edit=is_edit, created_ids=created_ids)
     return raw_post_id
 
 
@@ -227,8 +231,7 @@ def save_parsed_rows(
     created_ids: set[int] = set()
     with connection:
         for row in rows:
-            post_id = save_parsed_row(connection, row, _batch_ids=batch_ids, source_rules=source_rules,
-                                      _created_ids=created_ids)
+            post_id = _save_parsed_row(connection, row, batch_ids, source_rules or {}, created_ids=created_ids)
             touched_ids.update(r[0] for r in connection.execute(
                 "SELECT event_id FROM event_sources WHERE raw_post_id = ?", (post_id,)
             ))
@@ -444,7 +447,7 @@ def fetch_event_detail(
             e.id, e.title, e.date, e.end_date, e.time, e.end_time,
             e.place, e.address, e.category, e.price, e.confidence,
             e.reason, e.status, e.created_at,
-            e.event_state, e.previous_date, e.last_change_at, e.last_change_post_id,
+            e.event_state, e.previous_date, e.last_change_at, e.last_change_post_id, e.last_change_role,
             e.conflict_at, e.conflict_post_id,
             cp.url AS last_change_url, xp.url AS conflict_url,
             p.id AS raw_post_id, p.message_id, p.url, p.text, p.published_at,
@@ -499,32 +502,32 @@ def update_event(
         names = ", ".join(sorted(unknown))
         raise ValueError(f"Unknown editable fields: {names}")
 
-    current = connection.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
-    if current is None:
-        return False
-
-    if fields.get("event_state", current["event_state"]) not in {"scheduled", "postponed", "cancelled"}:
-        raise ValueError("Invalid event state")
-    if resolve_conflict is not None and (
-        current["conflict_post_id"] is None
-        or resolve_conflict.get("post_id") != current["conflict_post_id"]
-        or resolve_conflict.get("at") != current["conflict_at"]
-    ):
-        raise ValueError("Спорное сообщение изменилось. Обновите карточку перед проверкой")
-
-    assignments = []
-    values: list[Any] = []
-    for name in ADMIN_EDITABLE_FIELDS:
-        if name in fields:
-            assignments.append(f"{name} = ?")
-            values.append(fields[name])
-    if not assignments and resolve_conflict is None:
-        return connection.execute(
-            "SELECT 1 FROM events WHERE id = ?", (event_id,)
-        ).fetchone() is not None
-
-    values.append(event_id)
     with connection:
+        if not connection.in_transaction:
+            connection.execute("BEGIN IMMEDIATE")
+        current = connection.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
+        if current is None:
+            return False
+
+        if fields.get("event_state", current["event_state"]) not in {"scheduled", "postponed", "cancelled"}:
+            raise ValueError("Invalid event state")
+        if resolve_conflict is not None and (
+            current["conflict_post_id"] is None
+            or resolve_conflict.get("post_id") != current["conflict_post_id"]
+            or resolve_conflict.get("at") != current["conflict_at"]
+        ):
+            raise ValueError("Спорное сообщение изменилось. Обновите карточку перед проверкой")
+
+        assignments = []
+        values: list[Any] = []
+        for name in ADMIN_EDITABLE_FIELDS:
+            if name in fields:
+                assignments.append(f"{name} = ?")
+                values.append(fields[name])
+        if not assignments and resolve_conflict is None:
+            return True
+
+        values.append(event_id)
         if assignments:
             connection.execute(f"UPDATE events SET {', '.join(assignments)} WHERE id = ?", values)
             connection.executemany(
@@ -544,13 +547,15 @@ def update_event(
 def merge_events(connection: sqlite3.Connection, event_id: int, target_id: int) -> bool:
     if event_id == target_id:
         raise ValueError("Choose a different event")
-    source = fetch_event_detail(connection, event_id)
-    target = fetch_event_detail(connection, target_id)
-    if source is None or target is None:
-        return False
-    if {s["raw_post_id"] for s in source["sources"]} & {s["raw_post_id"] for s in target["sources"]}:
-        raise ValueError("Нельзя объединить карточки с общим постом: потеряются извлечённые сведения. Лишнюю карточку можно скрыть")
     with connection:
+        if not connection.in_transaction:
+            connection.execute("BEGIN IMMEDIATE")
+        source = fetch_event_detail(connection, event_id)
+        target = fetch_event_detail(connection, target_id)
+        if source is None or target is None:
+            return False
+        if {s["raw_post_id"] for s in source["sources"]} & {s["raw_post_id"] for s in target["sources"]}:
+            raise ValueError("Нельзя объединить карточки с общим постом: потеряются извлечённые сведения. Лишнюю карточку можно скрыть")
         connection.execute(
             """INSERT INTO event_sources (event_id, raw_post_id, extracted_json, version_at)
             SELECT ?, raw_post_id, extracted_json, version_at FROM event_sources WHERE event_id = ?""",
@@ -658,90 +663,106 @@ def _save_events(
         if event_id is None:
             match_id = event.get("_match_id")
             event_id = batch_ids.get(match_id) if isinstance(match_id, int) and match_id < 0 else match_id
-        if event_id is not None:
-            current = connection.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
-            if current is None:
-                raise ValueError("Matched event no longer exists")
-            is_change = event.get("action", "announcement") != "announcement" or is_edit
-            historical = (current["last_change_at"] is not None and (
-                current["event_state"] != "scheduled" or event.get("date") == current["previous_date"]
-            ))
-            if current["last_change_at"] and event.get("date") != current["date"]:
-                for saved in connection.execute(
-                    "SELECT extracted_json FROM event_sources WHERE event_id = ? AND extracted_json IS NOT NULL",
-                    (event_id,),
-                ):
-                    historical = historical or json.loads(saved[0]).get("date") == event.get("date")
-            incompatible = (not same_extraction and not is_change and not historical and (
-                event.get("date") != current["date"]
-                or (event.get("time") and current["time"] and event["time"] != current["time"])
-            ))
-            if not incompatible:
-                resolved = connection.execute(
-                    """SELECT r.version_at, p.published_at, p.edited_at
-                    FROM event_conflict_resolutions r JOIN raw_posts p ON p.id = r.raw_post_id
-                    WHERE r.event_id = ? AND r.raw_post_id = ?""", (event_id, raw_post_id),
-                ).fetchone()
-                if resolved is None or change_timestamp(dict(resolved)) > resolved["version_at"]:
-                    apply_event_update(connection, dict(current), raw_post_id, event,
-                                       source_rules, is_edit=is_edit)
-                    current = connection.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
-                    _fill_event(connection, dict(current), event)
-                save_event_source(connection, event_id, raw_post_id, event)
-                if "_batch_id" in event:
-                    batch_ids[event["_batch_id"]] = event_id
-                continue
-        cursor = connection.execute(
-            """
-            INSERT INTO events (
-                raw_post_id,
-                is_event,
-                title,
-                date,
-                end_date,
-                time,
-                end_time,
-                place,
-                address,
-                category,
-                price,
-                confidence,
-                reason,
-                status
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                raw_post_id,
-                1 if event["is_event"] else 0,
-                event["title"],
-                event["date"],
-                event["end_date"],
-                event["time"],
-                event["end_time"],
-                event["place"],
-                event["address"],
-                event["category"],
-                event["price"],
-                float(event["confidence"]),
-                event["reason"],
-                event["status"] if event.get("action", "announcement") == "announcement" else "draft",
-            ),
-        )
-        if created_ids is not None:
-            created_ids.add(cursor.lastrowid)
-        if event.get("action", "announcement") != "announcement":
-            state = "cancelled" if event["action"] == "cancel" else (
-                "postponed" if event["action"] == "reschedule" and not event.get("date") else "scheduled"
-            )
-            post = dict(connection.execute("SELECT * FROM raw_posts WHERE id = ?", (raw_post_id,)).fetchone())
-            connection.execute(
-                "UPDATE events SET event_state = ?, last_change_at = ?, last_change_post_id = ?, previous_date = ? WHERE id = ?",
-                (state, change_timestamp(post), raw_post_id, event.get("previous_date"), cursor.lastrowid),
-            )
-        save_event_source(connection, cursor.lastrowid, raw_post_id, event)
+        if event_id is None or not _save_existing_event(
+            connection, event_id, raw_post_id, event, source_rules,
+            same_extraction=same_extraction, is_edit=is_edit,
+        ):
+            event_id = _save_new_event(connection, raw_post_id, event)
+            if created_ids is not None:
+                created_ids.add(event_id)
         if "_batch_id" in event:
-            batch_ids[event["_batch_id"]] = cursor.lastrowid
+            batch_ids[event["_batch_id"]] = event_id
+
+
+def _save_existing_event(
+    connection: sqlite3.Connection, event_id: int, raw_post_id: int,
+    event: dict[str, Any], source_rules: dict,
+    *, same_extraction: bool, is_edit: bool,
+) -> bool:
+    current = connection.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
+    if current is None:
+        raise ValueError("Matched event no longer exists")
+    is_change = event.get("action", "announcement") != "announcement" or is_edit
+    historical = (current["last_change_at"] is not None and (
+        current["event_state"] != "scheduled" or event.get("date") == current["previous_date"]
+    ))
+    if current["last_change_at"] and event.get("date") != current["date"]:
+        for saved in connection.execute(
+            "SELECT extracted_json FROM event_sources WHERE event_id = ? AND extracted_json IS NOT NULL",
+            (event_id,),
+        ):
+            historical = historical or json.loads(saved[0]).get("date") == event.get("date")
+    incompatible = (not same_extraction and not is_change and not historical and (
+        event.get("date") != current["date"]
+        or (event.get("time") and current["time"] and event["time"] != current["time"])
+    ))
+    if incompatible:
+        return False
+    resolved = connection.execute(
+        """SELECT r.version_at, p.published_at, p.edited_at
+        FROM event_conflict_resolutions r JOIN raw_posts p ON p.id = r.raw_post_id
+        WHERE r.event_id = ? AND r.raw_post_id = ?""", (event_id, raw_post_id),
+    ).fetchone()
+    if resolved is None or change_timestamp(dict(resolved)) > resolved["version_at"]:
+        if apply_event_update(connection, dict(current), raw_post_id, event,
+                              source_rules, is_edit=is_edit):
+            current = connection.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
+            _fill_event(connection, dict(current), event)
+    save_event_source(connection, event_id, raw_post_id, event)
+    return True
+
+
+def _save_new_event(
+    connection: sqlite3.Connection, raw_post_id: int, event: dict[str, Any],
+) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO events (
+            raw_post_id,
+            is_event,
+            title,
+            date,
+            end_date,
+            time,
+            end_time,
+            place,
+            address,
+            category,
+            price,
+            confidence,
+            reason,
+            status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            raw_post_id,
+            1 if event["is_event"] else 0,
+            event["title"],
+            event["date"],
+            event["end_date"],
+            event["time"],
+            event["end_time"],
+            event["place"],
+            event["address"],
+            event["category"],
+            event["price"],
+            float(event["confidence"]),
+            event["reason"],
+            event["status"] if event.get("action", "announcement") == "announcement" else "draft",
+        ),
+    )
+    if event.get("action", "announcement") != "announcement":
+        state = "cancelled" if event["action"] == "cancel" else (
+            "postponed" if event["action"] == "reschedule" and not event.get("date") else "scheduled"
+        )
+        post = dict(connection.execute("SELECT * FROM raw_posts WHERE id = ?", (raw_post_id,)).fetchone())
+        connection.execute(
+            "UPDATE events SET event_state = ?, last_change_at = ?, last_change_post_id = ?, previous_date = ? WHERE id = ?",
+            (state, change_timestamp(post), raw_post_id, event.get("previous_date"), cursor.lastrowid),
+        )
+    save_event_source(connection, cursor.lastrowid, raw_post_id, event)
+    return cursor.lastrowid
 
 
 def _match_saved_extraction(

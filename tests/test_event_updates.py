@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from test_deduplication import post
 from tg_event.bot import format_events
-from tg_event.cli import _mark_repeats, _save_to_database
+from tg_event.pipeline import match_events, save_to_database
 from tg_event.database import (
     fetch_event_detail, fetch_published_events, init_database,
     save_parsed_row, save_parsed_rows, update_event,
@@ -88,6 +88,47 @@ class EventUpdatesTest(unittest.TestCase):
         text = format_events(self.visible())
         self.assertIn("Есть изменение, уточните у организатора", text)
 
+    def test_untrusted_update_does_not_fill_missing_fields(self):
+        row = post(2, action="update", price="500", changed_fields=["price"], _match_id=self.event_id)
+        row.update(source="unknown", post_url="https://t.me/unknown/2",
+                   published_at="2026-07-02T10:00:00+00:00")
+        save_parsed_rows(self.db, [row])
+
+        detail = fetch_event_detail(self.db, self.event_id)
+        self.assertIsNone(detail["price"])
+        self.assertIsNone(detail["last_change_at"])
+        self.assertEqual(detail["conflict_url"], row["post_url"])
+        self.assertEqual(len(detail["sources"]), 2)
+
+    def test_old_updates_and_announcements_do_not_restore_cleared_time(self):
+        self.change("update", time=None, changed_fields=["time"],
+                    published_at="2026-07-03T10:00:00+00:00")
+        cleared = fetch_event_detail(self.db, self.event_id)
+        self.assertIsNone(cleared["time"])
+        for action in ("update", "announcement"):
+            with self.subTest(action=action):
+                row = post(3, action=action, changed_fields=["time"], _match_id=self.event_id)
+                row["published_at"] = "2026-07-02T10:00:00+00:00"
+                save_parsed_rows(self.db, [row])
+                detail = fetch_event_detail(self.db, self.event_id)
+                self.assertIsNone(detail["time"])
+                self.assertEqual(detail["last_change_at"], cleared["last_change_at"])
+        save_parsed_rows(self.db, [self.original])
+        self.assertIsNone(fetch_event_detail(self.db, self.event_id)["time"])
+        self.change("update", message_id=4, time="19:00", changed_fields=["time"],
+                    published_at="2026-07-04T10:00:00+00:00")
+        self.assertEqual(fetch_event_detail(self.db, self.event_id)["time"], "19:00")
+
+    def test_ordinary_announcement_still_fills_missing_fields(self):
+        row = post(2, price="500", _match_id=self.event_id)
+        row.update(source="unknown", post_url="https://t.me/unknown/2",
+                   published_at="2026-07-02T10:00:00+00:00")
+        save_parsed_rows(self.db, [row])
+        detail = fetch_event_detail(self.db, self.event_id)
+        self.assertEqual(detail["price"], "500")
+        self.assertIsNone(detail["conflict_at"])
+        self.assertIsNone(detail["last_change_at"])
+
     def test_rejected_event_is_not_published_after_clarification(self):
         update_event(self.db, self.event_id, {"status": "rejected"})
         self.change("reschedule", date=None)
@@ -112,11 +153,21 @@ class EventUpdatesTest(unittest.TestCase):
         self.assertEqual(fetch_event_detail(self.db, self.event_id)["event_state"], "scheduled")
 
     def test_only_target_event_in_digest_is_cancelled(self):
-        row = post(3)
-        row["events"] = [dict(self.original["events"][0], title="Лекция", time="18:00")]
-        save_parsed_row(self.db, row)
-        self.change("cancel")
+        row = dict(self.original, events=[dict(self.original["events"][0]),
+                                         dict(self.original["events"][0], title="Лекция", time="18:00")])
+        save_parsed_rows(self.db, [row])
+        sibling_id = self.db.execute("SELECT id FROM events WHERE title='Лекция'").fetchone()[0]
+        before = dict(self.db.execute("SELECT * FROM events WHERE id=?", (sibling_id,)).fetchone())
+        row["edited_at"] = "2026-07-02T10:00:00+00:00"
+        row["raw_text"] = "Первое событие отменено, лекция состоится"
+        row["events"][0].update(action="cancel", _match_id=self.event_id)
+        save_parsed_rows(self.db, [row])
+
         self.assertEqual([e["title"] for e in self.visible()], ["Лекция"])
+        self.assertEqual(dict(self.db.execute("SELECT * FROM events WHERE id=?", (sibling_id,)).fetchone()), before)
+        self.assertEqual(fetch_event_detail(self.db, self.event_id)["event_state"], "cancelled")
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM raw_posts").fetchone()[0], 1)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM event_sources").fetchone()[0], 2)
 
     def test_edit_of_original_updates_only_changed_fields_and_keeps_id(self):
         row = post(1, time="18:00")
@@ -136,8 +187,8 @@ class EventUpdatesTest(unittest.TestCase):
         row = post(2, action="reschedule", previous_date="2026-07-12", date="2026-07-15")
         row["published_at"] = "2026-07-02T10:00:00+00:00"
         settings = SimpleNamespace(openrouter_api_key="test", openrouter_fallback_model="test")
-        with patch("tg_event.cli.find_repeats", return_value=[self.event_id]) as match:
-            _mark_repeats(self.db, settings, [row])
+        with patch("tg_event.pipeline.find_repeats", return_value=[self.event_id]) as match:
+            match_events(self.db, settings, [row])
         self.assertTrue(match.called)
         self.assertEqual(row["events"][0]["_match_id"], self.event_id)
 
@@ -156,8 +207,8 @@ class EventUpdatesTest(unittest.TestCase):
         row = post(4)
         row["published_at"] = "2026-07-04T10:00:00+00:00"
         settings = SimpleNamespace(openrouter_api_key="test", openrouter_fallback_model="test")
-        with patch("tg_event.cli.find_repeats", return_value=[self.event_id]):
-            _mark_repeats(self.db, settings, [row])
+        with patch("tg_event.pipeline.find_repeats", return_value=[self.event_id]):
+            match_events(self.db, settings, [row])
         save_parsed_rows(self.db, [row])
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM events").fetchone()[0], 1)
         self.assertEqual(self.visible()[0]["date"], "2026-07-20")
@@ -224,6 +275,57 @@ class EventUpdatesTest(unittest.TestCase):
         self.assertEqual(fetch_event_detail(self.db, self.event_id)["event_state"], "scheduled")
         self.assertEqual(self.visible()[0]["conflict_url"], venue["post_url"])
 
+    def test_organizer_authority_survives_content_only_edit(self):
+        original = dict(self.original, events=[dict(self.original["events"][0], organizer="Клуб")])
+        rules = {"events_vrn": {"organizers": ["Клуб"]}, "venue": {"venues": ["Митбоулинг"]}}
+        save_parsed_rows(self.db, [original], source_rules=rules)
+        before = dict(self.db.execute("SELECT * FROM events WHERE id=?", (self.event_id,)).fetchone())
+        edited = dict(self.original, edited_at="2026-07-02T10:00:00+00:00", raw_text="Правка только текста")
+        save_parsed_rows(self.db, [edited], source_rules=rules)
+        after = dict(self.db.execute("SELECT * FROM events WHERE id=?", (self.event_id,)).fetchone())
+        self.assertEqual(after["last_change_at"], before["last_change_at"])
+        self.assertEqual(after["updated_at"], before["updated_at"])
+
+        venue = post(3, action="cancel", _match_id=self.event_id)
+        venue.update(source="venue", post_url="https://t.me/venue/3", published_at="2026-07-03T10:00:00+00:00")
+        save_parsed_rows(self.db, [venue], source_rules=rules)
+        detail = fetch_event_detail(self.db, self.event_id)
+        self.assertEqual(detail["event_state"], "scheduled")
+        self.assertEqual(detail["conflict_url"], venue["post_url"])
+
+        own_update = post(4, action="reschedule", date="2026-07-15", _match_id=self.event_id)
+        own_update["published_at"] = "2026-07-04T10:00:00+00:00"
+        save_parsed_rows(self.db, [own_update], source_rules=rules)
+        detail = fetch_event_detail(self.db, self.event_id)
+        self.assertEqual(detail["date"], "2026-07-15")
+        self.assertEqual(detail["event_state"], "scheduled")
+        self.assertIsNone(detail["conflict_at"])
+        self.assertEqual(detail["last_change_url"], own_update["post_url"])
+
+    def test_sparse_organizer_keeps_priority_over_linked_venue(self):
+        original = dict(self.original, events=[dict(self.original["events"][0], organizer="Клуб")])
+        rules = {"events_vrn": {"organizers": ["Клуб"]}, "venue": {"venues": ["Митбоулинг"]}}
+        save_parsed_rows(self.db, [original], source_rules=rules)
+        venue = post(2, _match_id=self.event_id)
+        venue.update(source="venue", post_url="https://t.me/venue/2", published_at="2026-07-01T12:00:00+00:00")
+        save_parsed_rows(self.db, [venue], source_rules=rules)
+        edited = dict(self.original, edited_at="2026-07-02T10:00:00+00:00", raw_text="Правка только текста")
+        save_parsed_rows(self.db, [edited], source_rules=rules)
+
+        detail = fetch_event_detail(self.db, self.event_id)
+        self.assertEqual(detail["url"], original["post_url"])
+        self.assertIsNone(detail["last_change_at"])
+        self.assertIsNone(detail["last_change_post_id"])
+        self.assertNotIn("organizer", detail["sources"][0]["extracted_event"])
+        venue["message_id"] = 3
+        venue["post_url"] = "https://t.me/venue/3"
+        venue["published_at"] = "2026-07-03T10:00:00+00:00"
+        venue["events"][0]["action"] = "cancel"
+        save_parsed_rows(self.db, [venue], source_rules=rules)
+        detail = fetch_event_detail(self.db, self.event_id)
+        self.assertEqual(detail["event_state"], "scheduled")
+        self.assertEqual(detail["conflict_url"], venue["post_url"])
+
     def test_upgrade_from_legacy_schema_keeps_id_fields_and_status(self):
         legacy = sqlite3.connect(":memory:")
         legacy.row_factory = sqlite3.Row
@@ -272,9 +374,9 @@ class EventUpdatesTest(unittest.TestCase):
             settings = SimpleNamespace(database_path=Path(folder) / "db.sqlite3",
                                        source_rules_path=Path(folder) / "rules.json",
                                        openrouter_api_key="test", openrouter_fallback_model="test")
-            with patch("tg_event.cli.find_repeats", return_value=[None, -1]), \
-                    patch("tg_event.cli.today_in_city", return_value=date(2026, 7, 1)):
-                _save_to_database(settings, [transfer, original])
+            with patch("tg_event.pipeline.find_repeats", return_value=[None, -1]), \
+                    patch("tg_event.pipeline.today_in_city", return_value=date(2026, 7, 1)):
+                save_to_database(settings, [transfer, original])
             connection = sqlite3.connect(settings.database_path)
             connection.row_factory = sqlite3.Row
             try:

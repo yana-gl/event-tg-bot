@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tg_event.cli import _mark_repeats
+from tg_event.pipeline import match_events
 from tg_event.database import (
     fetch_event_detail, fetch_published_events, init_database,
     save_parsed_row, save_parsed_rows, update_event,
@@ -33,9 +33,30 @@ class DeduplicationTest(unittest.TestCase):
         self.db.close()
 
     def process(self, rows, matches):
-        with patch("tg_event.cli.find_repeats", return_value=matches):
-            _mark_repeats(self.db, self.settings, rows)
+        with patch("tg_event.pipeline.find_repeats", return_value=matches):
+            match_events(self.db, self.settings, rows)
         save_parsed_rows(self.db, rows)
+
+    def test_matching_skips_empty_posts_and_single_event_without_candidates(self):
+        empty = post(1)
+        empty["events"] = []
+        with patch("tg_event.pipeline.find_repeats") as request:
+            match_events(self.db, self.settings, [empty])
+            match_events(self.db, self.settings, [post(2)])
+        request.assert_not_called()
+
+    def test_digest_and_existing_candidates_use_one_matching_request(self):
+        save_parsed_row(self.db, post(1))
+        digest = post(2)
+        digest["events"].append(dict(digest["events"][0], title="Лекция", time="18:00"))
+        with patch("tg_event.pipeline.find_repeats", return_value=[1, None]) as request:
+            match_events(self.db, self.settings, [digest])
+        request.assert_called_once()
+        self.assertEqual(len(request.call_args.kwargs["new_events"]), 2)
+        self.assertEqual(request.call_args.kwargs["model"], self.settings.openrouter_fallback_model)
+        save_parsed_rows(self.db, [digest])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM events").fetchone()[0], 2)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM event_sources").fetchone()[0], 3)
 
     def test_merge_fills_only_empty_fields_and_keeps_id(self):
         save_parsed_row(self.db, post(1))

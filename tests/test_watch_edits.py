@@ -8,7 +8,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from test_deduplication import post
-from tg_event.cli import _watch_loop, parse_rows
+from tg_event.watcher import watch_loop
+from tg_event.pipeline import parse_rows
 from tg_event.database import connect_database, fetch_event_detail, init_database, save_parsed_row
 from tg_event.event_schema import validate_event
 from tg_event.storage import write_jsonl
@@ -16,7 +17,7 @@ from tg_event.storage import write_jsonl
 
 class WatchEditsTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        cleanup = patch("tg_event.cli.run_cleanup", return_value={"skipped": True})
+        cleanup = patch("tg_event.watcher.run_cleanup", return_value={"skipped": True})
         cleanup.start()
         self.addCleanup(cleanup.stop)
 
@@ -49,11 +50,11 @@ class WatchEditsTest(unittest.IsolatedAsyncioTestCase):
                 return parse_rows(rows, settings, parse_one=lambda **kw: [validate_event(payload)],
                                   progress=lambda message: None)
 
-            with patch("tg_event.cli._collect", AsyncMock(return_value=raw_path)), patch(
-                "tg_event.cli.parse_rows", side_effect=fake_parse,
-            ) as parse, patch("tg_event.cli.find_repeats", return_value=[event_id]), patch("builtins.print"):
+            with patch("tg_event.watcher.collect_to_file", AsyncMock(return_value=raw_path)), patch(
+                "tg_event.watcher.parse_rows", side_effect=fake_parse,
+            ) as parse, patch("tg_event.pipeline.find_repeats", return_value=[event_id]), patch("builtins.print"):
                 for _ in range(2):
-                    await _watch_loop(settings, interval=1, once=True, since_date="2026-07-03",
+                    await watch_loop(settings, interval=1, once=True, since_date="2026-07-03",
                                       state_path=state_path, max_posts_per_cycle=None, max_posts_per_channel=10)
 
             self.assertEqual(parse.call_count, 1)

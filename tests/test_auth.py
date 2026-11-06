@@ -33,6 +33,11 @@ class AuthTest(unittest.TestCase):
     def test_garbage_token_rejected(self):
         self.assertIsNone(verify_token("not.a.token", "s3cr3t"))
 
+    def test_non_ascii_token_is_rejected(self):
+        for token in ("é.x", "body.é"):
+            with self.subTest(token=token):
+                self.assertIsNone(verify_token(token, "s3cr3t"))
+
     def test_empty_secret_cannot_issue_tokens(self):
         for secret in ("", "   "):
             with self.subTest(secret=secret), self.assertRaisesRegex(ValueError, "ADMIN_SECRET"):

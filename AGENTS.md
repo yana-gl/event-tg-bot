@@ -24,14 +24,15 @@
 
 ### Структура `tg_event/`
 
-- `cli.py` — точка входа (`python -m tg_event.cli`), команды: `collect`, `parse`, `run`, `watch`.
+- `cli.py` — разбор аргументов и запуск команд `collect`, `parse`, `run`, `watch`, `serve`, `cleanup`.
+- `pipeline.py` — сбор в JSONL, параллельный разбор, сопоставление событий и сохранение пакета; без управления расписанием. Подробные границы и восстановление — [ARCHITECTURE.md](ARCHITECTURE.md).
 - `config.py` — `Settings` (dataclass), `load_dotenv`, реквизиты и общие настройки.
 - `collector.py` — чтение постов из Telegram через Telethon.
 - `openrouter_parser.py` — отправка поста в LLM, валидация event-JSON.
 - `event_schema.py` — схема события (поля, категории, статусы).
 - `storage.py` — чтение/запись JSONL, `dated_path`.
 - `database.py` — SQLite: `connect_database`, `init_database`, `save_parsed_rows`, `fetch_published_events`.
-- `watcher.py` — фильтрация новых/изменённых постов и атомарная JSON-копия прогресса; основной прогресс хранится в SQLite (`watch_progress`).
+- `watcher.py` — цикл сбора и восстановления, совместный запуск с ботом, фильтрация новых/изменённых постов и атомарная JSON-копия прогресса; основной прогресс хранится в SQLite (`watch_progress`).
 - `event_updates.py` — применение переносов/отмен/уточнений с проверкой времени, источника и защиты ручных полей.
 - `cleanup.py` — предварительный просмотр и очистка через 30 дней с резервной копией, еженедельный вызов из watcher.
 - `channels.py` — управление каналами в SQLite, первая загрузка последних N постов и состояние проверок.
@@ -69,7 +70,7 @@
 
 При очистке сохранять настройки каналов и прогресс. Уже существующие записи, включая `legacy`, не пересоздавать и не сбрасывать; старый маркер `channel_import` не используется. Если включённых каналов нет, сборщик не обращается к Telegram. Env остаётся для реквизитов и общих настроек.
 
-Реализация: [channels.py](tg_event/channels.py), [схема и прогресс](tg_event/database.py), [сборщик](tg_event/collector.py), [цикл watcher](tg_event/cli.py). Проверки без реальных запросов: `python3 -m unittest discover -s tests -p test_channels.py`.
+Реализация: [channels.py](tg_event/channels.py), [схема и прогресс](tg_event/database.py), [сборщик](tg_event/collector.py), [цикл watcher](tg_event/watcher.py). Проверки без реальных запросов: `python3 -m unittest discover -s tests -p test_channels.py`.
 
 ### Схема SQLite
 
@@ -195,7 +196,7 @@ python3 -m unittest discover -s tests
 - **Будущая обработка дублей и обновлений:** перед задачами о дедупликации, выборе основного источника, переносах и отменах прочитай [EVENT_DUPLICATES.md](EVENT_DUPLICATES.md). Там зафиксированы целевое поведение и открытые вопросы; это не описание текущей реализации и не поручение реализовать всё сразу.
 
 - **Без новых Python-зависимостей.** В `requirements.txt` только `telethon`. Всё остальное — стандартная библиотека. Если задача требует новой зависимости — обсуди.
-- **Исключение — админ-фронтенд `admin-ui/`.** Это Vue 3 + Vite + Pinia + Vuestic UI с оболочкой и темой из Vuestic Admin на Node-тулчейне. Единственное место в репо, где допускаются npm-зависимости и билд-степ. Запускается командой `serve` (`python -m tg_event.cli serve`); для прода нужен `cd admin-ui && npm run build` (собранный `dist/` отдаётся тем же Python-сервером, `dist/` в git не коммитится). Python-сторона админки (`tg_event/admin.py`, `tg_event/auth.py`) — stdlib-only.
+- **Исключение — админ-фронтенд `admin-ui/`.** Это Vue 3 + Vite + Pinia + Vuestic UI с оболочкой и темой из Vuestic Admin на Node-тулчейне. Единственное место в репо, где допускаются npm-зависимости и билд-степ. Запускается командой `serve` (`python -m tg_event.cli serve`); для прода нужен `cd admin-ui && npm run build` (собранный `dist/` отдаётся тем же Python-сервером, `dist/` в git не коммитится). Python-сторона админки (`tg_event/admin.py`, `tg_event/admin_service.py`, `tg_event/auth.py`) — stdlib-only.
 - **Без сторонних `.env`-парсеров.** Используй существующую `load_dotenv` из `tg_event/config.py`.
 - **Стиль:** `from __future__ import annotations`, dataclasses для конфигов, `Path` для путей, type hints.
 - **Комментарии:** не добавляй комментарии, если явно не просят.

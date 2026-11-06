@@ -17,7 +17,8 @@ from test_watch_recovery import FeedClient
 from tg_event.admin import make_handler
 from tg_event.auth import issue_token
 from tg_event.channels import add_channel, list_channels, normalize_channel, update_channel
-from tg_event.cli import _watch_loop, parse_rows
+from tg_event.watcher import watch_loop
+from tg_event.pipeline import parse_rows
 from tg_event.database import connect_database, init_database
 
 
@@ -132,8 +133,8 @@ class ManagedWatchTest(unittest.IsolatedAsyncioTestCase):
         self.fail_posts = set()
         for target in (
             patch.dict("sys.modules", {"telethon": SimpleNamespace(TelegramClient=lambda *a: self.client)}),
-            patch("tg_event.cli.parse_rows", side_effect=self.parse),
-            patch("tg_event.cli.run_cleanup", return_value={"skipped": True}),
+            patch("tg_event.watcher.parse_rows", side_effect=self.parse),
+            patch("tg_event.watcher.run_cleanup", return_value={"skipped": True}),
             patch("builtins.print"),
         ):
             target.start()
@@ -168,15 +169,15 @@ class ManagedWatchTest(unittest.IsolatedAsyncioTestCase):
             return list_channels(db)
 
     async def cycle(self, quota=1):
-        await _watch_loop(self.settings, interval=1, once=True, since_date="2026-08-01",
+        await watch_loop(self.settings, interval=1, once=True, since_date="2026-08-01",
                           state_path=self.root / "state.json", max_posts_per_cycle=None, max_posts_per_channel=quota)
 
     async def test_initial_load_drains_without_waiting_between_batches(self):
         self.feed(5)
         self.add(count=5)
-        with patch("tg_event.cli.asyncio.sleep", AsyncMock(side_effect=asyncio.CancelledError())) as sleep:
+        with patch("tg_event.watcher.asyncio.sleep", AsyncMock(side_effect=asyncio.CancelledError())) as sleep:
             with self.assertRaises(asyncio.CancelledError):
-                await _watch_loop(self.settings, interval=1800, once=False, since_date="2026-08-01",
+                await watch_loop(self.settings, interval=1800, once=False, since_date="2026-08-01",
                                   state_path=self.root / "state.json", max_posts_per_cycle=None,
                                   max_posts_per_channel=2)
         self.assertEqual(self.attempts, [("name", i) for i in range(1, 6)])
@@ -187,20 +188,20 @@ class ManagedWatchTest(unittest.IsolatedAsyncioTestCase):
         self.feed(5)
         self.add(count=5)
         self.fail_posts.add(1)
-        with patch("tg_event.cli.asyncio.sleep", AsyncMock(side_effect=asyncio.CancelledError())) as sleep:
+        with patch("tg_event.watcher.asyncio.sleep", AsyncMock(side_effect=asyncio.CancelledError())) as sleep:
             with self.assertRaises(asyncio.CancelledError):
-                await _watch_loop(self.settings, interval=1800, once=False, since_date="2026-08-01",
+                await watch_loop(self.settings, interval=1800, once=False, since_date="2026-08-01",
                                   state_path=self.root / "state.json", max_posts_per_cycle=None,
                                   max_posts_per_channel=2)
         self.assertEqual(self.attempts, [("name", 1), ("name", 2)])
         self.assertEqual(self.channels()[0]["initial_status"], "loading")
         sleep.assert_awaited_once_with(1800)
         self.fail_posts.clear()
-        with patch("tg_event.cli._watch_cycle", AsyncMock(return_value=False)) as cycle, patch(
-            "tg_event.cli.asyncio.sleep", AsyncMock(side_effect=asyncio.CancelledError()),
+        with patch("tg_event.watcher.watch_cycle", AsyncMock(return_value=False)) as cycle, patch(
+            "tg_event.watcher.asyncio.sleep", AsyncMock(side_effect=asyncio.CancelledError()),
         ):
             with self.assertRaises(asyncio.CancelledError):
-                await _watch_loop(self.settings, interval=1800, once=False, since_date="2026-08-01",
+                await watch_loop(self.settings, interval=1800, once=False, since_date="2026-08-01",
                                   state_path=self.root / "state.json", max_posts_per_cycle=None,
                                   max_posts_per_channel=2)
         cycle.assert_awaited_once()
@@ -291,7 +292,7 @@ class ManagedWatchTest(unittest.IsolatedAsyncioTestCase):
     async def test_failed_database_save_keeps_initial_window_for_retry(self):
         self.feed(5)
         self.add()
-        with patch("tg_event.cli._save_to_database", side_effect=sqlite3.OperationalError("failed")):
+        with patch("tg_event.watcher.save_to_database", side_effect=sqlite3.OperationalError("failed")):
             with self.assertRaises(sqlite3.OperationalError):
                 await self.cycle()
         self.assertEqual(self.channels()[0]["initial_start_id"], 2)

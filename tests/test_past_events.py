@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from test_deduplication import post
-from tg_event.cli import _save_to_database
+from tg_event.pipeline import save_to_database
 from tg_event.database import connect_database, fetch_known_posts, init_database, init_watch_progress, save_parsed_row
 from tg_event.watcher import filter_new_posts
 
@@ -20,14 +20,14 @@ class PastEventsTest(unittest.TestCase):
         root = Path(folder.name)
         self.settings = SimpleNamespace(database_path=root / "db.sqlite3", source_rules_path=root / "rules.json",
             event_timezone="Asia/Vladivostok", openrouter_api_key="test", openrouter_fallback_model="test")
-        clock = patch("tg_event.cli.today_in_city", return_value=date(2026, 10, 26))
+        clock = patch("tg_event.pipeline.today_in_city", return_value=date(2026, 10, 26))
         self.clock = clock.start()
         self.addCleanup(clock.stop)
 
     def save(self, rows, matches=None, **kwargs):
         count = sum(len(r["events"]) for r in rows)
-        with patch("tg_event.cli.find_repeats", return_value=matches or [None] * count):
-            return _save_to_database(self.settings, rows, **kwargs)
+        with patch("tg_event.pipeline.find_repeats", return_value=matches or [None] * count):
+            return save_to_database(self.settings, rows, **kwargs)
 
     def events(self):
         with connect_database(self.settings.database_path) as db:
@@ -87,7 +87,7 @@ class PastEventsTest(unittest.TestCase):
     def test_local_midnight_changes_creation_cutoff(self):
         instant = datetime.fromisoformat("2026-10-25T14:00:00+00:00")
         from tg_event.bot import today_in_city
-        with patch("tg_event.cli.today_in_city", wraps=today_in_city), patch("tg_event.bot.datetime") as clock:
+        with patch("tg_event.pipeline.today_in_city", wraps=today_in_city), patch("tg_event.bot.datetime") as clock:
             clock.now.side_effect = lambda tz: instant.astimezone(tz)
             self.save([post(1, date="2026-10-25")])
             self.assertEqual(self.events(), [])

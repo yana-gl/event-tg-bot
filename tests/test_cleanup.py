@@ -14,7 +14,8 @@ from unittest.mock import AsyncMock, patch
 
 from test_deduplication import post
 from tg_event.cleanup import run_cleanup
-from tg_event.cli import _watch_cycle, main
+from tg_event.watcher import watch_cycle
+from tg_event.cli import main
 from tg_event.database import connect_database, init_database, save_parsed_row, save_parsed_rows, update_event
 
 
@@ -272,11 +273,11 @@ class CleanupWatchTest(unittest.IsolatedAsyncioTestCase):
             settings.raw_dir.mkdir()
             raw_path = settings.raw_dir / "posts-empty.jsonl"
             raw_path.write_text("")
-            with patch("tg_event.cli._collect", new=AsyncMock(return_value=raw_path)), \
-                    patch("tg_event.cli.parse_rows") as parser, patch("builtins.print"), \
-                    patch("tg_event.cli.run_cleanup", wraps=run_cleanup) as cleanup:
+            with patch("tg_event.watcher.collect_to_file", new=AsyncMock(return_value=raw_path)), \
+                    patch("tg_event.watcher.parse_rows") as parser, patch("builtins.print"), \
+                    patch("tg_event.watcher.run_cleanup", wraps=run_cleanup) as cleanup:
                 for _ in range(2):
-                    failed = await _watch_cycle(settings, "2026-01-01", root / "state.json", None, 10)
+                    failed = await watch_cycle(settings, "2026-01-01", root / "state.json", None, 10)
                     self.assertFalse(failed)
                 parser.assert_not_called()
                 self.assertEqual(cleanup.call_count, 2)
