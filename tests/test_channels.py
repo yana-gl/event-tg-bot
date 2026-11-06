@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -147,7 +148,7 @@ class ManagedWatchTest(unittest.IsolatedAsyncioTestCase):
             if message_id in self.fail_posts:
                 raise ValueError("bad response")
             return []
-        return parse_rows(rows, settings, parse_one=parse_one, **kwargs)
+        return parse_rows(rows, settings, parse_one=parse_one, max_workers=1, **kwargs)
 
     def feed(self, count, channel="name"):
         start = datetime(2026, 7, 1, tzinfo=timezone.utc)
@@ -169,6 +170,40 @@ class ManagedWatchTest(unittest.IsolatedAsyncioTestCase):
     async def cycle(self, quota=1):
         await _watch_loop(self.settings, interval=1, once=True, since_date="2026-08-01",
                           state_path=self.root / "state.json", max_posts_per_cycle=None, max_posts_per_channel=quota)
+
+    async def test_initial_load_drains_without_waiting_between_batches(self):
+        self.feed(5)
+        self.add(count=5)
+        with patch("tg_event.cli.asyncio.sleep", AsyncMock(side_effect=asyncio.CancelledError())) as sleep:
+            with self.assertRaises(asyncio.CancelledError):
+                await _watch_loop(self.settings, interval=1800, once=False, since_date="2026-08-01",
+                                  state_path=self.root / "state.json", max_posts_per_cycle=None,
+                                  max_posts_per_channel=2)
+        self.assertEqual(self.attempts, [("name", i) for i in range(1, 6)])
+        self.assertEqual(self.channels()[0]["initial_status"], "complete")
+        sleep.assert_awaited_once_with(1800)
+
+    async def test_initial_load_waits_after_failure_or_no_progress(self):
+        self.feed(5)
+        self.add(count=5)
+        self.fail_posts.add(1)
+        with patch("tg_event.cli.asyncio.sleep", AsyncMock(side_effect=asyncio.CancelledError())) as sleep:
+            with self.assertRaises(asyncio.CancelledError):
+                await _watch_loop(self.settings, interval=1800, once=False, since_date="2026-08-01",
+                                  state_path=self.root / "state.json", max_posts_per_cycle=None,
+                                  max_posts_per_channel=2)
+        self.assertEqual(self.attempts, [("name", 1), ("name", 2)])
+        self.assertEqual(self.channels()[0]["initial_status"], "loading")
+        sleep.assert_awaited_once_with(1800)
+        self.fail_posts.clear()
+        with patch("tg_event.cli._watch_cycle", AsyncMock(return_value=False)) as cycle, patch(
+            "tg_event.cli.asyncio.sleep", AsyncMock(side_effect=asyncio.CancelledError()),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await _watch_loop(self.settings, interval=1800, once=False, since_date="2026-08-01",
+                                  state_path=self.root / "state.json", max_posts_per_cycle=None,
+                                  max_posts_per_channel=2)
+        cycle.assert_awaited_once()
 
     async def test_initial_window_is_frozen_and_new_posts_during_bootstrap_are_not_lost(self):
         self.feed(5)

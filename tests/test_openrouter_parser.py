@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest.mock import patch
 
@@ -5,6 +6,7 @@ from tg_event.openrouter_parser import (
     build_prompt,
     extract_json_object,
     find_repeats,
+    parse_event_with_openrouter,
 )
 
 
@@ -18,6 +20,42 @@ def _make_find_repeats_response(content):
 
 
 class OpenRouterParserTest(unittest.TestCase):
+    def test_invalid_event_response_uses_fallback(self):
+        valid_event = dict(is_event=True, title="Лекция", date="2026-11-07", end_date=None,
+                           time=None, end_time=None, place=None, address=None, category="lecture",
+                           price=None, confidence=0.9, reason="Анонс")
+        incomplete = dict(valid_event)
+        incomplete.pop("end_date")
+        invalid_responses = [
+            _make_find_repeats_response(json.dumps({"events": [incomplete], "post_reason": "Анонс"})),
+            _make_find_repeats_response("invalid JSON"),
+            {"choices": []},
+            _make_find_repeats_response(None),
+            {"choices": [{"finish_reason": "length", "message": {"content": '{"events": [], "post_reason": ""}'}}]},
+            TimeoutError("timed out"),
+        ]
+        valid = _make_find_repeats_response(json.dumps({"events": [valid_event], "post_reason": "Анонс"}))
+        for invalid in invalid_responses:
+            with self.subTest(invalid=invalid), patch(
+                "tg_event.openrouter_parser._request_openrouter", side_effect=[invalid, valid],
+            ) as request:
+                events = parse_event_with_openrouter(
+                    api_key="test", model="primary", fallback_model="fallback", text="Лекция",
+                    published_at="2026-11-05", source="test", city="Владивосток",
+                )
+                self.assertEqual(events[0].date, "2026-11-07")
+                self.assertEqual([call.kwargs["model"] for call in request.call_args_list], ["primary", "fallback"])
+
+    def test_both_invalid_responses_fail_after_one_retry(self):
+        with patch("tg_event.openrouter_parser._request_openrouter", return_value=
+                   _make_find_repeats_response('{"events": [{}], "post_reason": ""}')) as request:
+            with self.assertRaises(ValueError):
+                parse_event_with_openrouter(
+                    api_key="test", model="same", fallback_model="same", text="Лекция",
+                    published_at="2026-11-05", source="test", city="Владивосток",
+                )
+        self.assertEqual(request.call_count, 2)
+
     def test_extract_json_object_accepts_plain_json(self):
         text = '{"is_event": false, "title": null}'
 

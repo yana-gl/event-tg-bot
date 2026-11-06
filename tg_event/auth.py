@@ -5,7 +5,30 @@ import hashlib
 import hmac
 import json
 import time
+from threading import Lock
 from typing import Any
+
+
+class LoginLimiter:
+    def __init__(self) -> None:
+        self._attempts: dict[str, tuple[float, int]] = {}
+        self._lock = Lock()
+
+    def allow(self, client: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            self._attempts = {
+                key: value for key, value in self._attempts.items() if now - value[0] < 60
+            }
+            started, count = self._attempts.get(client, (now, 0))
+            if count >= 5 or (client not in self._attempts and len(self._attempts) >= 1024):
+                return False
+            self._attempts[client] = (started, count + 1)
+            return True
+
+    def reset(self, client: str) -> None:
+        with self._lock:
+            self._attempts.pop(client, None)
 
 
 def _b64url(data: bytes) -> str:
@@ -18,8 +41,8 @@ def _b64url_decode(text: str) -> bytes:
 
 
 def _secret_key(secret: str) -> bytes:
-    if not secret:
-        return b"tg-event-default-admin-secret"
+    if not secret.strip():
+        raise ValueError("ADMIN_SECRET must not be empty")
     return secret.encode("utf-8")
 
 
@@ -31,6 +54,8 @@ def issue_token(user: str, secret: str, ttl_seconds: int = 7 * 24 * 3600) -> str
 
 
 def verify_token(token: str, secret: str) -> str | None:
+    if not secret.strip():
+        return None
     try:
         body_b64, signature_b64 = token.split(".", 1)
     except ValueError:

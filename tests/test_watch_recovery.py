@@ -77,7 +77,7 @@ class WatchRecoveryTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(target.stop)
 
     def parse(self, rows, settings, **kwargs):
-        return parse_rows(rows, settings, parse_one=self.parse_one, **kwargs)
+        return parse_rows(rows, settings, parse_one=self.parse_one, max_workers=1, **kwargs)
 
     def parse_one(self, **kwargs):
         message_id = int(kwargs["text"])

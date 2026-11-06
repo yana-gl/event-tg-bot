@@ -1,0 +1,16 @@
+[Unit]
+Description=Telegram event SQLite backup
+
+[Service]
+Type=oneshot
+User=tg-event
+Group=tg-event
+WorkingDirectory=/opt/tg-event
+ExecStart=/opt/tg-event/.venv/bin/python deploy/backup.py
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/tg-event
+UMask=0077

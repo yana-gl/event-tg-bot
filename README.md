@@ -1,5 +1,9 @@
 # tg-event POC
 
+Инструкция по размещению текущей версии на сервере: [deploy/README.md](deploy/README.md).
+
+Админка: https://event-admin.localplayer.dev — HTTPS, вход с данными администратора, SSH-туннель не требуется.
+
 Proof of concept for a Telegram event-board bot pipeline.
 
 The POC does three things:
@@ -100,6 +104,8 @@ By default, watcher:
 - checks channels every 1800 seconds;
 - processes only posts from today's date;
 - parses at most 10 new posts per channel in one cycle;
+- parses up to three posts concurrently, preserving result order;
+- continues an unfinished initial channel load immediately while progress advances, without waiting 1800 seconds between successful batches;
 - stores channel progress in `data/state/channels.json`.
 
 Run one safe test cycle and exit:

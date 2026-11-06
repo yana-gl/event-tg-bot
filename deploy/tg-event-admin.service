@@ -1,0 +1,23 @@
+[Unit]
+Description=Telegram event admin
+After=network.target
+
+[Service]
+Type=simple
+User=tg-event
+Group=tg-event
+WorkingDirectory=/opt/tg-event
+ExecStart=/opt/tg-event/.venv/bin/python -m tg_event.cli serve --host 127.0.0.1 --port 8080
+Restart=on-failure
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tg-event
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

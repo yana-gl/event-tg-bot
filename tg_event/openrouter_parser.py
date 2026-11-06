@@ -50,6 +50,7 @@ def build_prompt(text: str, published_at: str, source: str, city: str, edited_at
 }}
 
 Правила:
+- Все поля схемы обязательны, в том числе end_date. Неизвестные значения передавай как null, а не пропускай поле.
 - Один Telegram-пост может содержать 0, 1 или много событий.
 - Для каждого найденного события добавь отдельный объект в "events".
 - Если в посте нет анонсов событий или сообщений об их изменении, верни пустой массив "events": [].
@@ -116,13 +117,20 @@ def parse_event_with_openrouter(
         edited_at=edited_at,
     )
 
-    try:
-        payload = _request_openrouter(api_key=api_key, model=model, prompt=prompt)
-    except (ValueError, urllib.error.HTTPError, urllib.error.URLError):
-        payload = _request_openrouter(api_key=api_key, model=fallback_model, prompt=prompt)
-
-    content = payload["choices"][0]["message"]["content"]
-    return validate_event_response(extract_json_object(content)).events
+    for attempt, selected_model in enumerate((model, fallback_model)):
+        try:
+            payload = _request_openrouter(api_key=api_key, model=selected_model, prompt=prompt)
+            choice = payload["choices"][0]
+            if choice.get("finish_reason") == "length":
+                raise ValueError("Model response exceeded the output limit")
+            content = choice["message"]["content"]
+            if not isinstance(content, str):
+                raise ValueError("Model response contains no text")
+            return validate_event_response(extract_json_object(content)).events
+        except (ValueError, KeyError, IndexError, TypeError, TimeoutError,
+                urllib.error.HTTPError, urllib.error.URLError):
+            if attempt:
+                raise
 
 
 def _request_openrouter(api_key: str, model: str, prompt: str) -> dict[str, Any]:
@@ -136,6 +144,8 @@ def _request_openrouter(api_key: str, model: str, prompt: str) -> dict[str, Any]
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.1,
+        "max_tokens": 8192,
+        "reasoning": {"enabled": False},
     }
     request = urllib.request.Request(
         OPENROUTER_URL,

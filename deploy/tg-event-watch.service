@@ -1,0 +1,25 @@
+[Unit]
+Description=Telegram event bot and collector
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=tg-event
+Group=tg-event
+WorkingDirectory=/opt/tg-event
+ExecStartPre=/opt/tg-event/.venv/bin/python deploy/check_config.py
+ExecStart=/opt/tg-event/.venv/bin/python -m tg_event.cli watch --state /var/lib/tg-event/state/channels.json
+Restart=on-failure
+RestartSec=60
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tg-event
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

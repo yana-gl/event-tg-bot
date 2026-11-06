@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import hmac
 import json
 import mimetypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from sqlite3 import Connection
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
-from tg_event.auth import issue_token, verify_token
+from tg_event.auth import LoginLimiter, issue_token, verify_token
 from tg_event.config import Settings
 from tg_event.channels import add_channel, list_channels, update_channel
 from tg_event.database import (
@@ -36,6 +37,7 @@ class AdminHandler(BaseHTTPRequestHandler):
     settings: Settings
     db: Connection
     static_dir: Path
+    login_limiter: LoginLimiter
 
     server_version = "tg-event-admin/1.0"
 
@@ -117,20 +119,37 @@ class AdminHandler(BaseHTTPRequestHandler):
         self._send_json({"ok": True, "username": name})
 
     def _handle_login(self) -> None:
+        client = self.client_address[0]
+        if client in {"127.0.0.1", "::1"}:
+            client = self.headers.get("X-Real-IP") or client
+        if not self.login_limiter.allow(client):
+            self._send_json({"error": "Слишком много попыток входа. Повторите через минуту.",
+                             "retry_after": 60}, status=429)
+            return
         try:
             payload = self._read_body()
         except _ApiError as err:
             self._send_json({"error": err.message}, status=err.status)
             return
-        user = (payload.get("user") or "").strip()
-        password = (payload.get("password") or "").strip()
+        if not isinstance(payload, dict):
+            self._send_json({"error": "user and password required"}, status=400)
+            return
+        user = payload.get("user", "")
+        password = payload.get("password", "")
+        if not isinstance(user, str) or not isinstance(password, str):
+            self._send_json({"error": "user and password must be strings"}, status=400)
+            return
+        user, password = user.strip(), password.strip()
         if not user or not password:
             self._send_json({"error": "user and password required"}, status=400)
             return
-        if user != self.settings.admin_user or password != self.settings.admin_password:
+        valid_user = hmac.compare_digest(user.encode("utf-8"), self.settings.admin_user.encode("utf-8"))
+        valid_password = hmac.compare_digest(password.encode("utf-8"), self.settings.admin_password.encode("utf-8"))
+        if not valid_user or not valid_password:
             self._send_json({"error": "invalid credentials"}, status=401)
             return
         token = issue_token(user, self.settings.admin_secret)
+        self.login_limiter.reset(client)
         self._send_json({"token": token, "user": user})
 
     def _require_auth(self) -> str | None:
@@ -244,12 +263,16 @@ class AdminHandler(BaseHTTPRequestHandler):
         self._send_json({"ok": True})
 
     def _serve_static(self, path: str) -> None:
-        file_path = self.static_dir / (path.lstrip("/") or "index.html")
+        static_dir = self.static_dir.resolve()
+        file_path = (static_dir / (unquote(path).lstrip("/") or "index.html")).resolve()
         if file_path.is_dir():
-            file_path = file_path / "index.html"
+            file_path = (file_path / "index.html").resolve()
+        if not file_path.is_relative_to(static_dir):
+            self._send_text("Forbidden", status=403)
+            return
         if not file_path.exists() or not file_path.is_file():
-            index = self.static_dir / "index.html"
-            if index.exists():
+            index = (static_dir / "index.html").resolve()
+            if index.is_relative_to(static_dir) and index.is_file():
                 self._send_file(index)
                 return
             self._send_text(
@@ -334,6 +357,7 @@ def make_handler(settings: Settings, connection: Connection, static_dir: Path) -
         pass
 
     _Bound.settings = settings
+    _Bound.login_limiter = LoginLimiter()
     _Bound.db = connection
     _Bound.static_dir = static_dir
     return _Bound

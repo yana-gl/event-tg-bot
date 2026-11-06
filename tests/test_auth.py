@@ -33,10 +33,16 @@ class AuthTest(unittest.TestCase):
     def test_garbage_token_rejected(self):
         self.assertIsNone(verify_token("not.a.token", "s3cr3t"))
 
-    def test_default_secret_when_empty(self):
-        token = issue_token("admin", "")
-        self.assertEqual(verify_token(token, ""), "admin")
-        self.assertIsNone(verify_token(token, "nonempty"))
+    def test_empty_secret_cannot_issue_tokens(self):
+        for secret in ("", "   "):
+            with self.subTest(secret=secret), self.assertRaisesRegex(ValueError, "ADMIN_SECRET"):
+                issue_token("admin", secret)
+
+    def test_empty_secret_cannot_verify_tokens(self):
+        token = issue_token("admin", "s3cr3t")
+        for secret in ("", "   "):
+            with self.subTest(secret=secret):
+                self.assertIsNone(verify_token(token, secret))
 
 
 if __name__ == "__main__":

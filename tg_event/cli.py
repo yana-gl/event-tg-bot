@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -250,10 +251,16 @@ async def _watch_loop(
 ) -> None:
     while True:
         try:
+            initial_positions = {} if once else _initial_load_positions(settings, state_path)
             failed = await _watch_cycle(settings, since_date, state_path,
                                         max_posts_per_cycle, max_posts_per_channel)
             if failed and once:
                 raise RuntimeError("Some posts or channels failed; successful results were saved")
+            if not once and not failed and any(
+                position > initial_positions.get(channel, -1)
+                for channel, position in _initial_load_positions(settings, state_path).items()
+            ):
+                continue
         except Exception as error:
             print(f"Watch cycle failed ({type(error).__name__}); progress remains in SQLite", flush=True)
             if once:
@@ -261,6 +268,17 @@ async def _watch_loop(
         if once:
             return
         await asyncio.sleep(interval)
+
+
+def _initial_load_positions(settings: Settings, state_path: Path) -> dict[str, int]:
+    with connect_database(settings.database_path) as connection:
+        return dict(connection.execute(
+            """SELECT c.username, p.last_message_id
+               FROM channel_settings c JOIN watch_progress p ON p.source = c.username
+               WHERE p.state_key = ? AND c.enabled = 1 AND c.mode = 'recent'
+                 AND p.last_message_id < c.initial_end_id""",
+            (str(state_path.resolve()),),
+        ))
 
 
 async def _watch_cycle(
@@ -329,12 +347,11 @@ def parse_rows(
     parse_one=parse_event_with_openrouter,
     progress=print,
     continue_on_error: bool = False,
+    max_workers: int = 3,
 ):
     selected_rows = rows[:limit] if limit is not None else rows
     total = len(selected_rows)
-    parsed_rows = []
-    for index, row in enumerate(selected_rows, start=1):
-        progress(f"Parsing {index}/{total}: {row['source']}#{row['message_id']}")
+    def parse_row(row):
         try:
             events = parse_one(
                 api_key=settings.openrouter_api_key,
@@ -350,8 +367,8 @@ def parse_rows(
             if not continue_on_error:
                 raise
             progress(f"Parsing failed: {row['source']}#{row['message_id']} ({type(error).__name__})")
-            continue
-        parsed_rows.append(
+            return None
+        return (
             {
                 "source": row["source"],
                 "message_id": row["message_id"],
@@ -365,7 +382,19 @@ def parse_rows(
                 "events": [event.to_dict() for event in events],
             }
         )
-    return parsed_rows
+    if not selected_rows:
+        return []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+        for index, row in enumerate(selected_rows, start=1):
+            progress(f"Parsing {index}/{total}: {row['source']}#{row['message_id']}")
+            futures.append(executor.submit(parse_row, row))
+        try:
+            return [row for future in futures if (row := future.result()) is not None]
+        except Exception:
+            for future in futures:
+                future.cancel()
+            raise
 
 
 def _save_to_database(
@@ -485,6 +514,8 @@ def extract_links(text: str) -> list[str]:
 def _serve(settings: Settings, host: str, port: int, dev: bool) -> None:
     if not settings.admin_user or not settings.admin_password:
         raise SystemExit("ADMIN_USER and ADMIN_PASSWORD are required for serve")
+    if not settings.admin_secret.strip():
+        raise SystemExit("ADMIN_SECRET is required for serve")
 
     from tg_event.admin import serve as serve_admin
     from tg_event.database import init_database

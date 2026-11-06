@@ -1,0 +1,28 @@
+{
+	servers {
+		timeouts {
+			read_header 5s
+			read_body 30s
+			idle 2m
+		}
+	}
+}
+
+event-admin.localplayer.dev {
+	request_body {
+		max_size 1MB
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+	}
+
+	@api path /api/*
+	header @api Cache-Control no-store
+
+	reverse_proxy 127.0.0.1:8080 {
+		header_up X-Real-IP {remote_host}
+	}
+}

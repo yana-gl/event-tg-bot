@@ -1,4 +1,5 @@
 import unittest
+from threading import Barrier, Lock
 from types import SimpleNamespace
 
 from tg_event.cli import extract_links, parse_rows
@@ -13,6 +14,33 @@ class FakeEvent:
 
 
 class CliTest(unittest.TestCase):
+    def test_parallel_parsing_is_bounded_ordered_and_keeps_successes(self):
+        rows = [dict(source="test", message_id=i, published_at="2026-11-05", text=str(i),
+                     url=f"https://t.me/test/{i}", city="Владивосток") for i in range(1, 7)]
+        settings = SimpleNamespace(openrouter_api_key="test", openrouter_model="test", openrouter_fallback_model="test")
+        barrier = Barrier(3, timeout=3)
+        lock = Lock()
+        active = peak = 0
+
+        def parse_one(**kwargs):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(active, peak)
+            try:
+                barrier.wait()
+                if kwargs["text"] == "2":
+                    raise ValueError("invalid response")
+                return [FakeEvent(kwargs["text"])]
+            finally:
+                with lock:
+                    active -= 1
+
+        parsed = parse_rows(rows, settings, parse_one=parse_one, continue_on_error=True,
+                            progress=lambda message: None, max_workers=3)
+        self.assertEqual(peak, 3)
+        self.assertEqual([row["message_id"] for row in parsed], [1, 3, 4, 5, 6])
+
     def test_parse_rows_respects_limit(self):
         rows = [
             {
